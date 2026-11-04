@@ -19,4 +19,4 @@ Una UI liviana y nativa para tu sistema operativo. Isla dinámica, personalizaci
 | `docs/` | Arquitectura y decisiones |
 
 ## Licencia
-MIT
+Código fuente disponible bajo [PolyForm Noncommercial 1.0.0](LICENSE). Gratis para uso personal, educativo y sin fines de lucro. El uso comercial requiere permiso. El nombre y el logo están cubiertos por [TRADEMARK.md](TRADEMARK.md).
