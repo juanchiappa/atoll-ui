@@ -8,6 +8,7 @@ Atoll es una UI liviana y nativa (isla dinámica y más) para Windows, Linux y m
 - Los plugins viven en `/plugins` como procesos separados. El Core no los importa.
 - Sin `unwrap()`/`expect()` fuera de tests. Errores con `Result` y tipos propios.
 - Código específico de SO solo dentro de `core/atoll-platform`, con `#[cfg(target_os = "...")]`.
+- Licencia: Apache-2.0. No agregues dependencias GPL/AGPL ni con licencias incompatibles.
 
 ## Estructura
 core/atoll-core · core/atoll-platform · core/atoll-render

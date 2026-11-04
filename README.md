@@ -19,4 +19,6 @@ Una UI liviana y nativa para tu sistema operativo. Isla dinámica, personalizaci
 | `docs/` | Arquitectura y decisiones |
 
 ## Licencia
-Código fuente disponible bajo [PolyForm Noncommercial 1.0.0](LICENSE). Gratis para uso personal, educativo y sin fines de lucro. El uso comercial requiere permiso. El nombre y el logo están cubiertos por [TRADEMARK.md](TRADEMARK.md).
+
+Open source bajo [Apache License 2.0](LICENSE). El nombre y el logo de Atoll
+no están incluidos en la licencia: ver [TRADEMARK.md](TRADEMARK.md).
