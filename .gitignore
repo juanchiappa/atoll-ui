@@ -1,0 +1,19 @@
+# --- Rust & Cargo ---
+/target/
+Cargo.lock
+
+# --- Sistema Operativo & Temporales ---
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+
+# --- IDEs & Entornos ---
+.idea/
+*.iml
+.vscode/*
+!.vscode/settings.json
+
+# --- Plugins local ---
+/plugins/*
+!plugins/.gitkeep
