@@ -1,3 +1,5 @@
+Required Notice: Copyright (c) 2026 Juan Ignacio Chiappa (https://github.com/juanchiappa/atoll-ui)
+
 # PolyForm Noncommercial License 1.0.0
 
 <https://polyformproject.org/licenses/noncommercial/1.0.0>
