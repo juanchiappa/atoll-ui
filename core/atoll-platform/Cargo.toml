@@ -3,9 +3,13 @@ name = "atoll-platform"
 description = "Capa de plataforma de Atoll: todo el código específico de cada sistema operativo."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[dependencies]
+atoll-render.workspace = true
 
 # Solo se compila en Windows. Justificación en docs/DEPENDENCIES.md.
 [target.'cfg(windows)'.dependencies]

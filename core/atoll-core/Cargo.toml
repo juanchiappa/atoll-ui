@@ -3,6 +3,7 @@ name = "atoll-core"
 description = "Core de Atoll: loop de eventos, estado y host de plugins."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true

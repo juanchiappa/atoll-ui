@@ -1,24 +1,28 @@
 //! Backend de Windows (Win32).
 //!
 //! Loop orientado a eventos: `GetMessageW` bloquea el hilo hasta que llega un
-//! mensaje, así que en reposo el consumo de CPU es 0%. La isla solo se dibuja
-//! cuando Windows manda `WM_PAINT`.
+//! mensaje, así que en reposo el consumo de CPU es 0%. La isla es una ventana
+//! con transparencia por píxel (`WS_EX_LAYERED`): la imagen se entrega una sola
+//! vez a Windows con `UpdateLayeredWindow` y el sistema la mantiene en pantalla
+//! sin que Atoll haga nada más.
 
+use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
-use std::ptr::{null, null_mut};
+use std::ptr::{copy_nonoverlapping, null, null_mut};
 
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM};
+use atoll_render::Frame;
+use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    SetWindowRgn, PAINTSTRUCT,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetSystemMetrics, LoadCursorW, PostQuitMessage, RegisterClassExW, SetProcessDPIAware,
-    ShowWindow, TranslateMessage, UnregisterClassW, IDC_ARROW, MSG, SM_CXSCREEN, SW_SHOWNOACTIVATE,
-    WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    ShowWindow, TranslateMessage, UnregisterClassW, UpdateLayeredWindow, IDC_ARROW, MSG,
+    SM_CXSCREEN, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY, WM_RBUTTONUP, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::{Backend, IslandConfig, PlatformError};
@@ -26,17 +30,18 @@ use crate::{Backend, IslandConfig, PlatformError};
 /// Nombre de la clase de ventana registrada en Win32.
 const CLASS_NAME: &str = "AtollIsland";
 
-/// Color de la isla (COLORREF 0x00BBGGRR): negro puro.
-const ISLAND_COLOR: u32 = 0x0000_0000;
-
 /// Backend nativo para Windows.
 pub(crate) struct WindowsBackend;
 
 impl Backend for WindowsBackend {
-    fn run(&mut self, config: &IslandConfig) -> Result<(), PlatformError> {
+    fn run(&mut self, config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError> {
+        let size = frame.size();
+        if size.width != config.width || size.height != config.height {
+            return Err(PlatformError::InvalidFrame);
+        }
         // SAFETY: todas las llamadas Win32 ocurren en este hilo, que es el
         // dueño de la ventana y de su cola de mensajes.
-        unsafe { run_island(config) }
+        unsafe { run_island(config, frame) }
     }
 }
 
@@ -57,9 +62,9 @@ fn os_error(call: &'static str) -> PlatformError {
 /// # Safety
 ///
 /// Debe llamarse desde un único hilo, que pasa a ser el dueño de la ventana.
-unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
-    let width = i32::try_from(config.width).unwrap_or(i32::MAX);
-    let height = i32::try_from(config.height).unwrap_or(i32::MAX);
+unsafe fn run_island(config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError> {
+    let width = i32::try_from(config.width).map_err(|_| PlatformError::InvalidFrame)?;
+    let height = i32::try_from(config.height).map_err(|_| PlatformError::InvalidFrame)?;
     let top = i32::try_from(config.top_margin).unwrap_or(0);
 
     // SAFETY: sin precondiciones; evita que Windows escale la ventana.
@@ -97,7 +102,7 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
     // SAFETY: la clase ya está registrada y los punteros son válidos.
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name.as_ptr(),
             class_name.as_ptr(),
             WS_POPUP,
@@ -118,15 +123,18 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
         return Err(err);
     }
 
-    // SAFETY: `hwnd` es válido. Si la región se crea, Windows pasa a ser su
-    // dueño y no hay que liberarla; si falla, la isla queda rectangular.
-    unsafe {
-        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, height, height);
-        if !region.is_null() {
-            SetWindowRgn(hwnd, region, 1);
+    // SAFETY: `hwnd` es válido y pertenece a este hilo.
+    if let Err(err) = unsafe { present_frame(hwnd, left, top, frame) } {
+        // SAFETY: `hwnd` es válido; la clase fue registrada arriba.
+        unsafe {
+            DestroyWindow(hwnd);
+            UnregisterClassW(class_name.as_ptr(), hinstance);
         }
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        return Err(err);
     }
+
+    // SAFETY: `hwnd` es válido.
+    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
 
     // SAFETY: `MSG` es un struct de datos planos; cero es un valor válido.
     let mut message: MSG = unsafe { zeroed() };
@@ -152,6 +160,102 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
     result
 }
 
+/// Entrega la imagen a Windows como contenido de la ventana (alfa por píxel).
+///
+/// # Safety
+///
+/// `hwnd` debe ser una ventana válida con `WS_EX_LAYERED`, propiedad de este hilo.
+unsafe fn present_frame(
+    hwnd: HWND,
+    left: i32,
+    top: i32,
+    frame: &Frame,
+) -> Result<(), PlatformError> {
+    let size = frame.size();
+    let width = i32::try_from(size.width).map_err(|_| PlatformError::InvalidFrame)?;
+    let height = i32::try_from(size.height).map_err(|_| PlatformError::InvalidFrame)?;
+    let pixels = frame.bgra_premultiplied();
+    if pixels.len() != size.width as usize * size.height as usize * 4 {
+        return Err(PlatformError::InvalidFrame);
+    }
+
+    // SAFETY: con ventana nula devuelve el contexto de dispositivo de la pantalla.
+    let screen_dc = unsafe { GetDC(null_mut()) };
+    if screen_dc.is_null() {
+        return Err(os_error("GetDC"));
+    }
+    // SAFETY: `screen_dc` es válido.
+    let memory_dc = unsafe { CreateCompatibleDC(screen_dc) };
+    if memory_dc.is_null() {
+        let err = os_error("CreateCompatibleDC");
+        // SAFETY: `screen_dc` fue obtenido con `GetDC(null)`.
+        unsafe { ReleaseDC(null_mut(), screen_dc) };
+        return Err(err);
+    }
+
+    // SAFETY: `BITMAPINFO` es de datos planos; cero es un valor válido.
+    let mut info: BITMAPINFO = unsafe { zeroed() };
+    info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+    info.bmiHeader.biWidth = width;
+    // Alto negativo: las filas van de arriba hacia abajo, igual que el `Frame`.
+    info.bmiHeader.biHeight = -height;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+
+    let mut bits: *mut c_void = null_mut();
+    // SAFETY: `info` describe un bitmap de 32 bits y `bits` recibe su memoria.
+    let bitmap =
+        unsafe { CreateDIBSection(screen_dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0) };
+
+    let result = if bitmap.is_null() || bits.is_null() {
+        Err(os_error("CreateDIBSection"))
+    } else {
+        // SAFETY: `bits` apunta a `width * height * 4` bytes y `pixels` tiene
+        // exactamente esa cantidad (verificado arriba); no se superponen.
+        unsafe { copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u8>(), pixels.len()) };
+
+        let origin = POINT { x: left, y: top };
+        let extent = SIZE {
+            cx: width,
+            cy: height,
+        };
+        let source = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+
+        // SAFETY: todos los punteros apuntan a variables locales vivas y los
+        // contextos de dispositivo son válidos.
+        unsafe {
+            let previous = SelectObject(memory_dc, bitmap);
+            let ok = UpdateLayeredWindow(
+                hwnd, screen_dc, &origin, &extent, memory_dc, &source, 0, &blend, ULW_ALPHA,
+            );
+            let outcome = if ok == 0 {
+                Err(os_error("UpdateLayeredWindow"))
+            } else {
+                Ok(())
+            };
+            SelectObject(memory_dc, previous);
+            outcome
+        }
+    };
+
+    // SAFETY: se liberan los recursos creados arriba, una sola vez cada uno.
+    unsafe {
+        if !bitmap.is_null() {
+            DeleteObject(bitmap);
+        }
+        DeleteDC(memory_dc);
+        ReleaseDC(null_mut(), screen_dc);
+    }
+    result
+}
+
 /// Procedimiento de ventana: reacciona a cada evento que manda Windows.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
@@ -160,13 +264,6 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
-        WM_PAINT => {
-            // SAFETY: Windows invoca este procedimiento con un `hwnd` válido.
-            unsafe { paint(hwnd) };
-            0
-        }
-        // Evita el parpadeo: pintamos todo en WM_PAINT.
-        WM_ERASEBKGND => 1,
         // Clic derecho sobre la isla: cerrar.
         WM_RBUTTONUP => {
             // SAFETY: `hwnd` es válido y pertenece a este hilo.
@@ -180,29 +277,5 @@ unsafe extern "system" fn window_proc(
         }
         // SAFETY: delegamos el resto al procedimiento por defecto de Windows.
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
-    }
-}
-
-/// Dibuja la isla: un rectángulo negro (la región redondeada la recorta).
-///
-/// # Safety
-///
-/// `hwnd` debe ser una ventana válida de este hilo, dentro de `WM_PAINT`.
-unsafe fn paint(hwnd: HWND) {
-    // SAFETY: `PAINTSTRUCT` es de datos planos; cero es un valor válido.
-    let mut ps: PAINTSTRUCT = unsafe { zeroed() };
-    // SAFETY: `hwnd` es válido y estamos dentro de `WM_PAINT`.
-    let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-    if hdc.is_null() {
-        return;
-    }
-    // SAFETY: el pincel se crea, se usa y se libera acá mismo.
-    unsafe {
-        let brush = CreateSolidBrush(ISLAND_COLOR);
-        if !brush.is_null() {
-            FillRect(hdc, &ps.rcPaint, brush);
-            DeleteObject(brush);
-        }
-        EndPaint(hwnd, &ps);
     }
 }
