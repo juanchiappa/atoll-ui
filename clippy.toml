@@ -1,0 +1,3 @@
+# Los tests pueden usar expect/unwrap; en código de producción siguen prohibidos.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true

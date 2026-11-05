@@ -18,7 +18,7 @@
 
 ## Decisiones
 
-- **Render por software** (`tiny-skia` + `softbuffer`) en lugar de GPU (`wgpu`): una isla ocupa pocos píxeles y la GPU suma drivers y memoria. *Estas dependencias se agregan cuando se implemente el render.*
+- **Render por software** con `tiny-skia` en lugar de GPU (`wgpu`): una isla ocupa pocos píxeles y la GPU suma drivers y memoria. En Windows, el resultado se entrega a una ventana con transparencia por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`): Windows conserva la imagen en pantalla y Atoll no hace nada hasta el próximo evento. Para Linux y macOS se evaluará `softbuffer` o el mecanismo nativo equivalente.
 - **Backends nativos por SO** detrás de un mismo trait: Win32 (`windows-sys`), AppKit (`objc2`) y Wayland/X11 en Linux.
 - **Plugins como procesos separados**, no librerías dinámicas: aislan crashes y consumo de memoria del Core, y pueden escribirse en cualquier lenguaje. Se descubren en `/plugins/<nombre>/plugin.toml` y hablan con el Core por named pipes (Windows) o sockets Unix (Linux/macOS).
 

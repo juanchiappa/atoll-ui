@@ -3,9 +3,14 @@ name = "atoll-render"
 description = "Render por software de Atoll, orientado a eventos y por regiones dañadas."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+# Justificación en docs/DEPENDENCIES.md.
+[dependencies]
+tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
