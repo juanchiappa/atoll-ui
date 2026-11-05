@@ -1,0 +1,19 @@
+[package]
+name = "atoll-core"
+description = "Core de Atoll: loop de eventos, estado y host de plugins."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "atoll"
+path = "src/main.rs"
+
+[dependencies]
+atoll-platform.workspace = true
+atoll-render.workspace = true
+
+[lints]
+workspace = true
