@@ -9,6 +9,12 @@
 //! La animación de hover usa un timer de Win32 que **solo existe mientras la
 //! isla se está moviendo**: arranca cuando el mouse entra o sale y se apaga
 //! apenas la animación termina.
+//!
+//! Única excepción: el reloj. Hay UN timer de un solo disparo, alineado al
+//! próximo cambio de minuto. Cuando salta se apaga, se redibuja solo si el
+//! minuto cambió y se vuelve a armar con los milisegundos que faltan. No hay
+//! polling. También se re-sincroniza si el usuario cambia la hora del sistema
+//! (`WM_TIMECHANGE`) o si la PC vuelve de suspensión.
 
 use std::cell::Cell;
 use std::ffi::c_void;
@@ -16,7 +22,7 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{copy_nonoverlapping, null, null_mut};
 use std::time::{Duration, Instant};
 
-use atoll_render::{render_island, Frame, Size};
+use atoll_render::{Frame, Size};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
@@ -29,14 +35,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetSystemMetrics, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassExW,
-    SetProcessDPIAware, SetTimer, ShowWindow, TranslateMessage, UnregisterClassW,
-    UpdateLayeredWindow, IDC_ARROW, MSG, SM_CXSCREEN, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY,
-    WM_MOUSEMOVE, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SetCoalescableTimer, SetProcessDPIAware, SetTimer, ShowWindow, TranslateMessage,
+    UnregisterClassW, UpdateLayeredWindow, IDC_ARROW, MSG, PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND, SM_CXSCREEN, SW_SHOWNOACTIVATE, TIMERV_NO_COALESCING, ULW_ALPHA,
+    WM_DESTROY, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMECHANGE, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::animation::Animator;
-use crate::{Backend, IslandConfig, PlatformError};
+use crate::clock::{local_time, LocalTime};
+use crate::{Backend, IslandConfig, Painter, PlatformError};
 
 /// Nombre de la clase de ventana registrada en Win32.
 const CLASS_NAME: &str = "AtollIsland";
@@ -50,6 +58,18 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// Identificador del timer de la animación.
 const ANIMATION_TIMER: usize = 1;
 
+/// Identificador del timer del reloj (un solo disparo por minuto).
+const CLOCK_TIMER: usize = 2;
+
+/// Margen que se suma a la espera del reloj, en milisegundos.
+///
+/// Evita que el timer salte unos milisegundos antes del cambio de minuto y haya
+/// que armarlo dos veces.
+const CLOCK_MARGIN_MS: u32 = 20;
+
+/// Espera de respaldo, en milisegundos, si no se pudiera leer la hora.
+const CLOCK_FALLBACK_MS: u32 = 60_000;
+
 /// Milisegundos entre cuadros de la animación (≈ 60 cuadros por segundo).
 const FRAME_INTERVAL_MS: u32 = 16;
 
@@ -62,19 +82,30 @@ thread_local! {
     static ANIMATOR: Cell<Option<Animator>> = const { Cell::new(None) };
     /// Margen superior de la isla, en píxeles.
     static TOP_MARGIN: Cell<i32> = const { Cell::new(0) };
+    /// Quien dibuja el contenido de la isla. Se saca del `Cell` mientras dibuja
+    /// y se vuelve a guardar, para no depender de préstamos entre mensajes.
+    static PAINTER: Cell<Option<Box<dyn Painter>>> = const { Cell::new(None) };
+    /// Hora con la que se dibujó el último cuadro: sirve para no redibujar si el texto no cambió.
+    static LAST_DRAWN: Cell<Option<LocalTime>> = const { Cell::new(None) };
 }
 
 /// Backend nativo para Windows.
 pub(crate) struct WindowsBackend;
 
 impl Backend for WindowsBackend {
-    fn run(&mut self, config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError> {
-        if frame.size() != config.size {
-            return Err(PlatformError::InvalidFrame);
-        }
+    fn run(
+        &mut self,
+        config: &IslandConfig,
+        painter: Box<dyn Painter>,
+    ) -> Result<(), PlatformError> {
+        PAINTER.set(Some(painter));
         // SAFETY: todas las llamadas Win32 ocurren en este hilo, que es el
         // dueño de la ventana y de su cola de mensajes.
-        unsafe { run_island(config, frame) }
+        let result = unsafe { run_island(config) };
+        PAINTER.set(None);
+        ANIMATOR.set(None);
+        LAST_DRAWN.set(None);
+        result
     }
 }
 
@@ -109,7 +140,13 @@ fn island_origin(width: u32) -> (i32, i32) {
 /// # Safety
 ///
 /// Debe llamarse desde un único hilo, que pasa a ser el dueño de la ventana.
-unsafe fn run_island(config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError> {
+unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
+    // Primer cuadro: se dibuja antes de crear la ventana para fallar rápido si no coincide.
+    let (frame, first_time) = paint(config.size).ok_or(PlatformError::InvalidFrame)?;
+    if frame.size() != config.size {
+        return Err(PlatformError::InvalidFrame);
+    }
+
     TOP_MARGIN.set(to_i32(config.top_margin));
     ANIMATOR.set(Some(Animator::new(
         config.size,
@@ -173,7 +210,7 @@ unsafe fn run_island(config: &IslandConfig, frame: &Frame) -> Result<(), Platfor
     }
 
     // SAFETY: `hwnd` es válido y pertenece a este hilo.
-    if let Err(err) = unsafe { present_frame(hwnd, left, top, frame) } {
+    if let Err(err) = unsafe { present_frame(hwnd, left, top, &frame) } {
         // SAFETY: `hwnd` es válido; la clase fue registrada arriba.
         unsafe {
             DestroyWindow(hwnd);
@@ -182,8 +219,13 @@ unsafe fn run_island(config: &IslandConfig, frame: &Frame) -> Result<(), Platfor
         return Err(err);
     }
 
+    LAST_DRAWN.set(Some(first_time));
+
     // SAFETY: `hwnd` es válido.
-    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    unsafe {
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        arm_clock(hwnd);
+    }
 
     // SAFETY: `MSG` es un struct de datos planos; cero es un valor válido.
     let mut message: MSG = unsafe { zeroed() };
@@ -204,7 +246,6 @@ unsafe fn run_island(config: &IslandConfig, frame: &Frame) -> Result<(), Platfor
         }
     };
 
-    ANIMATOR.set(None);
     // SAFETY: la ventana ya fue destruida; se libera la clase registrada.
     unsafe { UnregisterClassW(class_name.as_ptr(), hinstance) };
     result
@@ -361,14 +402,76 @@ unsafe fn on_timer(hwnd: HWND) {
     }
 }
 
+/// Le pide el cuadro a quien dibuja, para el tamaño dado y la hora actual.
+fn paint(size: Size) -> Option<(Frame, LocalTime)> {
+    let time = local_time().ok()?;
+    let mut painter = PAINTER.take()?;
+    let frame = painter.paint(size, time);
+    PAINTER.set(Some(painter));
+    frame.map(|frame| (frame, time))
+}
+
 /// Dibuja la isla con el tamaño dado y la entrega a Windows. `false` si falla.
 fn draw_step(hwnd: HWND, size: Size) -> bool {
-    let Ok(frame) = render_island(size) else {
+    let Some((frame, time)) = paint(size) else {
         return false;
     };
     let (left, top) = island_origin(size.width);
     // SAFETY: `hwnd` es la ventana de la isla, válida y de este hilo.
-    unsafe { present_frame(hwnd, left, top, &frame) }.is_ok()
+    let presented = unsafe { present_frame(hwnd, left, top, &frame) }.is_ok();
+    if presented {
+        LAST_DRAWN.set(Some(time));
+    }
+    presented
+}
+
+/// Arma el timer del reloj para el próximo cambio de minuto.
+///
+/// Se usa `SetCoalescableTimer` sin coalescencia: con el `SetTimer` común Windows
+/// puede agrupar timers y demorar el disparo, y el reloj cambiaría tarde.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, propiedad de este hilo.
+unsafe fn arm_clock(hwnd: HWND) {
+    let wait = local_time()
+        .map_or(CLOCK_FALLBACK_MS, |now| now.millis_until_next_minute())
+        .saturating_add(CLOCK_MARGIN_MS);
+    // SAFETY: `hwnd` es válido; sin función de callback, el aviso llega como `WM_TIMER`.
+    let armed = unsafe { SetCoalescableTimer(hwnd, CLOCK_TIMER, wait, None, TIMERV_NO_COALESCING) };
+    if armed == 0 {
+        // Respaldo: si Windows rechaza el timer sin coalescencia, se usa el común.
+        // SAFETY: ídem.
+        unsafe { SetTimer(hwnd, CLOCK_TIMER, wait, None) };
+    }
+}
+
+/// Disparo del timer del reloj, o cambio de hora del sistema, o regreso de suspensión.
+///
+/// Es de un solo disparo: apaga el timer, redibuja solo si el minuto cambió y
+/// vuelve a armarlo con los milisegundos que faltan.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_clock(hwnd: HWND) {
+    // SAFETY: `hwnd` es válido.
+    unsafe { KillTimer(hwnd, CLOCK_TIMER) };
+
+    if let Ok(now) = local_time() {
+        let stale = LAST_DRAWN
+            .get()
+            .is_none_or(|drawn| !drawn.same_minute(&now));
+        if stale {
+            let size = ANIMATOR.get().map(|animator| animator.size());
+            if let Some(size) = size {
+                draw_step(hwnd, size);
+            }
+        }
+    }
+
+    // SAFETY: `hwnd` es válido.
+    unsafe { arm_clock(hwnd) };
 }
 
 /// Procedimiento de ventana: reacciona a cada evento que manda Windows.
@@ -394,6 +497,26 @@ unsafe extern "system" fn window_proc(
             unsafe { on_timer(hwnd) };
             0
         }
+        WM_TIMER if wparam == CLOCK_TIMER => {
+            // SAFETY: ídem.
+            unsafe { on_clock(hwnd) };
+            0
+        }
+        // Cambió la hora del sistema: se re-sincroniza el reloj.
+        WM_TIMECHANGE => {
+            // SAFETY: ídem.
+            unsafe { on_clock(hwnd) };
+            0
+        }
+        // La PC volvió de suspensión: el timer pudo quedar desfasado.
+        WM_POWERBROADCAST
+            if wparam == PBT_APMRESUMEAUTOMATIC as usize
+                || wparam == PBT_APMRESUMESUSPEND as usize =>
+        {
+            // SAFETY: ídem.
+            unsafe { on_clock(hwnd) };
+            1
+        }
         // Clic derecho sobre la isla: cerrar.
         WM_RBUTTONUP => {
             // SAFETY: `hwnd` es válido y pertenece a este hilo.
@@ -404,6 +527,7 @@ unsafe extern "system" fn window_proc(
             // SAFETY: sin precondiciones; termina el loop de mensajes.
             unsafe {
                 KillTimer(hwnd, ANIMATION_TIMER);
+                KillTimer(hwnd, CLOCK_TIMER);
                 PostQuitMessage(0);
             }
             0

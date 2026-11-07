@@ -8,7 +8,10 @@ use std::fmt;
 
 use atoll_render::{Frame, Size};
 
+pub use clock::{local_time, LocalTime};
+
 pub mod animation;
+pub mod clock;
 
 #[cfg(windows)]
 mod windows;
@@ -93,21 +96,38 @@ impl fmt::Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
+/// Dibuja el contenido de la isla.
+///
+/// El backend lo llama cada vez que hay que mostrar algo nuevo: al abrir, en cada
+/// cuadro de la animación de hover y cuando cambia el minuto. Quién implementa
+/// este trait decide qué se ve; el backend solo lo entrega al sistema operativo.
+pub trait Painter {
+    /// Dibuja la isla con el tamaño `size` y la hora `time`.
+    ///
+    /// Devuelve `None` si no se pudo dibujar.
+    fn paint(&mut self, size: Size, time: LocalTime) -> Option<Frame>;
+}
+
 /// Backend nativo de un sistema operativo.
 ///
 /// Un backend abre la ventana de la isla y bloquea el hilo hasta que se
 /// cierra. Mientras no haya eventos, el hilo duerme: no hay render loop.
 pub trait Backend {
-    /// Muestra `frame` como isla y procesa eventos hasta que el usuario la cierra.
+    /// Muestra la isla dibujada por `painter` y procesa eventos hasta que el usuario la cierra.
     ///
     /// Al pasar el mouse la isla se expande a `config.hover_size` con una
-    /// animación, y vuelve a su tamaño al sacarlo.
+    /// animación, y vuelve a su tamaño al sacarlo. El backend mantiene un único
+    /// timer de un solo disparo, alineado al cambio de minuto, para redibujar la hora.
     ///
     /// # Errors
     ///
     /// Devuelve [`PlatformError`] si el sistema operativo rechaza alguna llamada
-    /// o si `frame` no tiene el tamaño de `config.size`.
-    fn run(&mut self, config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError>;
+    /// o si el primer cuadro no tiene el tamaño de `config.size`.
+    fn run(
+        &mut self,
+        config: &IslandConfig,
+        painter: Box<dyn Painter>,
+    ) -> Result<(), PlatformError>;
 }
 
 /// Devuelve el backend nativo del sistema operativo actual.

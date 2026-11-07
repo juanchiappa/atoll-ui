@@ -32,8 +32,8 @@ Referencia: Hecho / En revisión / Pendiente.
 | 5 | Render con `tiny-skia` y transparencia por píxel (#2) | Hecho |
 | 6 | Protección de `main`: PR obligatorio y los 3 checks requeridos | Hecho |
 | 7 | Animación de hover: la isla pasa de 400x40 a 480x64 y vuelve, con timer efímero (#3) | Hecho |
-| 8 | Primitiva de texto en `atoll-render` | En revisión |
-| 9 | Reloj en la isla | Pendiente |
+| 8 | Primitiva de texto en `atoll-render` (#5) | Hecho |
+| 9 | Reloj en la isla | En revisión |
 | 10 | Escalado DPI por monitor | Pendiente |
 | 11 | Protocolo IPC y host de plugins | Pendiente |
 | 12 | Backend de Linux (Wayland primero) | Pendiente |
@@ -48,7 +48,7 @@ La numeración de los ítems 1 a 6 se reconstruyó desde el historial de git. Si
 
 ## Ítems pendientes
 
-### 8. Primitiva de texto en `atoll-render` (en revisión)
+### 8. Primitiva de texto en `atoll-render` (hecho)
 
 - Solo `atoll-render`: no toca la ventana ni el backend.
 - `TextRenderer::draw` dibuja un texto sobre un `Frame`; `measure` y `line_metrics` ayudan a centrarlo.
@@ -58,9 +58,10 @@ La numeración de los ítems 1 a 6 se reconstruyó desde el historial de git. Si
 - **Aceptación:** tests de píxeles (cobertura, color, recorte, caché), fmt, clippy y tests en verde en los 3 SO,
   RAM en reposo en Windows <= 8 MB.
 
-### 9. Reloj en la isla
+### 9. Reloj en la isla (en revisión)
 
 - La hora local sale de `GetLocalTime` (Windows). Sin crates de fechas.
+- El backend recibe un `Painter` (trait en `atoll-platform`) y el Core pinta el contenido (`IslandPainter`).
 - En reposo la isla muestra `HH:MM`; con hover muestra la hora y la fecha.
 - **Excepción deliberada a la regla de timers:** UN timer de un solo disparo por minuto, alineado al cambio de
   minuto. Se calcula cuántos milisegundos faltan y se re-arma en cada disparo. Sin polling. Solo se redibuja si
