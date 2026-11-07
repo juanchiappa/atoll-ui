@@ -3,8 +3,11 @@
 //! Se dibuja por software, solo cuando hace falta. No existe un render loop:
 //! cada llamada produce un [`Frame`] y quien lo pidió decide cuándo mostrarlo.
 
+mod text;
+
 use std::fmt;
 
+pub use text::{Color, LineMetrics, TextRenderer};
 use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
 
 /// Tamaño en píxeles de una superficie.
@@ -37,6 +40,10 @@ pub enum RenderError {
     InvalidSize(Size),
     /// No se pudo construir la forma a dibujar.
     InvalidShape,
+    /// La fuente embebida no se pudo cargar.
+    InvalidFont,
+    /// Tamaño de fuente o posición de texto fuera de rango (cero, negativo, no finito o demasiado grande).
+    InvalidTextParams,
 }
 
 impl fmt::Display for RenderError {
@@ -46,6 +53,8 @@ impl fmt::Display for RenderError {
                 write!(f, "tamaño inválido: {}x{}", size.width, size.height)
             }
             Self::InvalidShape => write!(f, "no se pudo construir la forma"),
+            Self::InvalidFont => write!(f, "no se pudo cargar la fuente embebida"),
+            Self::InvalidTextParams => write!(f, "tamaño o posición de texto inválidos"),
         }
     }
 }

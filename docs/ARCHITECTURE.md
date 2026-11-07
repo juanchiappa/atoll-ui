@@ -24,6 +24,8 @@
 
 - **Animaciones con timer efímero:** la lógica (`atoll-platform::animation`) es pura y no depende del SO. El backend arranca un timer solo cuando el mouse entra o sale de la isla y lo apaga al terminar la animación (≈180 ms). Fuera de eso no hay ningún timer activo: 0% de CPU en reposo.
 
+- **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 87 glifos, 8,8 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
+
 ## Fases
 1. Isla dinámica en Windows, midiendo RAM y CPU desde el primer commit.
 2. Mismo Core en Linux (Wayland primero).
