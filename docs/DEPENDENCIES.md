@@ -6,7 +6,7 @@ Regla del proyecto: cada crate nuevo se justifica por escrito acá, en el mismo 
 
 - **Qué es:** bindings crudos a la API Win32, generados por Microsoft. Sin runtime, sin código propio más allá de las declaraciones.
 - **Por qué:** crear la ventana de la isla y recibir eventos requiere Win32. Es la opción más liviana: el crate hermano `windows` agrega capas y tiempos de compilación, y los frameworks de UI (winit, egui) agregan decenas de dependencias y memoria.
-- **Costo:** cero en Linux y macOS (`[target.'cfg(windows)'.dependencies]`). En Windows, solo los módulos activados por features: `Win32_Foundation`, `Win32_Graphics_Gdi`, `Win32_System_LibraryLoader`, `Win32_UI_WindowsAndMessaging`.
+- **Costo:** cero en Linux y macOS (`[target.'cfg(windows)'.dependencies]`). En Windows, solo los módulos activados por features: `Win32_Foundation`, `Win32_Graphics_Gdi`, `Win32_System_LibraryLoader`, `Win32_UI_Input_KeyboardAndMouse` (aviso de que el mouse salió de la isla) y `Win32_UI_WindowsAndMessaging`.
 - **Licencia:** MIT OR Apache-2.0 (compatible con Apache-2.0).
 - **Mantenedor:** Microsoft.
 

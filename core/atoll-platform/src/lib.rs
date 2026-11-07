@@ -6,7 +6,9 @@
 
 use std::fmt;
 
-use atoll_render::Frame;
+use atoll_render::{Frame, Size};
+
+pub mod animation;
 
 #[cfg(windows)]
 mod windows;
@@ -43,21 +45,21 @@ impl Os {
 /// Configuración de la ventana de la isla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IslandConfig {
-    /// Ancho en píxeles.
-    pub width: u32,
-    /// Alto en píxeles.
-    pub height: u32,
+    /// Tamaño de la isla en reposo.
+    pub size: Size,
+    /// Tamaño de la isla cuando el mouse está encima.
+    pub hover_size: Size,
     /// Separación en píxeles entre el borde superior de la pantalla y la isla.
     pub top_margin: u32,
 }
 
 impl IslandConfig {
-    /// Crea una configuración a partir de tamaño y margen superior.
+    /// Crea una configuración a partir de los dos tamaños y el margen superior.
     #[must_use]
-    pub const fn new(width: u32, height: u32, top_margin: u32) -> Self {
+    pub const fn new(size: Size, hover_size: Size, top_margin: u32) -> Self {
         Self {
-            width,
-            height,
+            size,
+            hover_size,
             top_margin,
         }
     }
@@ -98,10 +100,13 @@ impl std::error::Error for PlatformError {}
 pub trait Backend {
     /// Muestra `frame` como isla y procesa eventos hasta que el usuario la cierra.
     ///
+    /// Al pasar el mouse la isla se expande a `config.hover_size` con una
+    /// animación, y vuelve a su tamaño al sacarlo.
+    ///
     /// # Errors
     ///
     /// Devuelve [`PlatformError`] si el sistema operativo rechaza alguna llamada
-    /// o si `frame` no tiene el tamaño de `config`.
+    /// o si `frame` no tiene el tamaño de `config.size`.
     fn run(&mut self, config: &IslandConfig, frame: &Frame) -> Result<(), PlatformError>;
 }
 
@@ -130,6 +135,7 @@ pub fn native_backend() -> Result<Box<dyn Backend>, PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::{IslandConfig, Os, PlatformError};
+    use atoll_render::Size;
 
     #[test]
     fn current_os_is_supported() {
@@ -138,11 +144,10 @@ mod tests {
 
     #[test]
     fn config_keeps_values() {
-        let config = IslandConfig::new(400, 40, 8);
-        assert_eq!(
-            (config.width, config.height, config.top_margin),
-            (400, 40, 8)
-        );
+        let config = IslandConfig::new(Size::new(400, 40), Size::new(480, 64), 8);
+        assert_eq!(config.size, Size::new(400, 40));
+        assert_eq!(config.hover_size, Size::new(480, 64));
+        assert_eq!(config.top_margin, 8);
     }
 
     #[test]
