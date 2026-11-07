@@ -1,10 +1,14 @@
 //! Punto de entrada del Core de Atoll.
 
+mod island;
+
 use std::error::Error;
 use std::process::ExitCode;
 
 use atoll_platform::{native_backend, IslandConfig};
-use atoll_render::{render_island, Size};
+use atoll_render::Size;
+
+use crate::island::IslandPainter;
 
 /// Tamaño de la isla en reposo.
 const ISLAND_SIZE: Size = Size::new(400, 40);
@@ -25,11 +29,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Dibuja la isla, la abre con el backend nativo y espera a que se cierre.
+/// Abre la isla con el backend nativo y espera a que se cierre.
 fn run() -> Result<(), Box<dyn Error>> {
-    let frame = render_island(ISLAND_SIZE)?;
     let config = IslandConfig::new(ISLAND_SIZE, ISLAND_HOVER_SIZE, TOP_MARGIN);
     let mut backend = native_backend()?;
-    backend.run(&config, &frame)?;
+    let painter = IslandPainter::new(ISLAND_SIZE, ISLAND_HOVER_SIZE)?;
+    backend.run(&config, Box::new(painter))?;
     Ok(())
 }
