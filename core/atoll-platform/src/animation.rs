@@ -91,6 +91,20 @@ impl Animator {
         true
     }
 
+    /// Cambia los tamaños de reposo y expandido, por ejemplo cuando cambia el DPI.
+    ///
+    /// No anima: cancela cualquier animación en curso y deja la isla ya en el
+    /// tamaño nuevo que corresponde al estado actual (expandido si el mouse está
+    /// encima, contraído si no). El estado de hover se conserva.
+    pub fn resize(&mut self, collapsed: Size, expanded: Size) {
+        self.collapsed = collapsed;
+        self.expanded = expanded;
+        self.current = if self.hovering { expanded } else { collapsed };
+        self.animating = false;
+        self.from = as_floats(self.current);
+        self.to = self.from;
+    }
+
     /// Avanza la animación hasta `now` y devuelve el tamaño correspondiente.
     pub fn tick(&mut self, now: Instant) -> Step {
         if !self.animating {
@@ -140,9 +154,10 @@ mod tests {
 
     const SMALL: Size = Size::new(400, 40);
     const BIG: Size = Size::new(480, 64);
+    const DURATION: Duration = Duration::from_millis(200);
 
     fn animator(now: Instant) -> Animator {
-        Animator::new(SMALL, BIG, Duration::from_millis(200), now)
+        Animator::new(SMALL, BIG, DURATION, now)
     }
 
     #[test]
@@ -214,5 +229,50 @@ mod tests {
         let step = anim.tick(t0);
         assert!(step.finished);
         assert_eq!(step.size, BIG);
+    }
+
+    #[test]
+    fn resize_while_collapsed_snaps_to_the_new_collapsed_size() {
+        let now = Instant::now();
+        let mut animator = Animator::new(Size::new(400, 40), Size::new(480, 64), DURATION, now);
+        animator.resize(Size::new(600, 60), Size::new(720, 96));
+        assert_eq!(animator.size(), Size::new(600, 60));
+        assert!(!animator.is_hovering());
+        let step = animator.tick(now);
+        assert!(step.finished);
+        assert_eq!(step.size, Size::new(600, 60));
+    }
+
+    #[test]
+    fn resize_while_hovering_keeps_the_hover_and_snaps_to_the_new_expanded_size() {
+        let now = Instant::now();
+        let mut animator = Animator::new(Size::new(400, 40), Size::new(480, 64), DURATION, now);
+        animator.set_hover(true, now);
+        animator.tick(now + DURATION / 2);
+
+        animator.resize(Size::new(600, 60), Size::new(720, 96));
+        assert!(animator.is_hovering());
+        assert_eq!(animator.size(), Size::new(720, 96));
+        assert!(
+            animator.tick(now + DURATION).finished,
+            "no queda animación pendiente"
+        );
+        assert_eq!(animator.size(), Size::new(720, 96));
+    }
+
+    #[test]
+    fn after_a_resize_the_next_hover_change_animates_between_the_new_sizes() {
+        let now = Instant::now();
+        let mut animator = Animator::new(Size::new(400, 40), Size::new(480, 64), DURATION, now);
+        animator.resize(Size::new(600, 60), Size::new(720, 96));
+
+        assert!(animator.set_hover(true, now));
+        let end = animator.tick(now + DURATION);
+        assert!(end.finished);
+        assert_eq!(end.size, Size::new(720, 96));
+
+        assert!(animator.set_hover(false, now + DURATION));
+        let back = animator.tick(now + DURATION * 2);
+        assert_eq!(back.size, Size::new(600, 60));
     }
 }

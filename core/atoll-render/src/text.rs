@@ -111,6 +111,14 @@ impl TextRenderer {
         self.cache.len()
     }
 
+    /// Vacía la caché de glifos.
+    ///
+    /// Se usa cuando cambia el factor de escala (DPI): los glifos rasterizados para
+    /// el tamaño anterior ya no se van a pedir, y no tiene sentido guardarlos.
+    pub fn clear_cache(&mut self) {
+        self.cache.clear();
+    }
+
     /// Medidas verticales de la fuente al tamaño pedido.
     ///
     /// # Errors
@@ -428,6 +436,23 @@ mod tests {
         r.draw(&mut second, "12:35", 10.0, 28.0, 20.0, Color::WHITE)
             .expect("dibuja");
         assert_eq!(r.cached_glyphs(), 6, "solo se suma el 5");
+    }
+
+    #[test]
+    fn clearing_the_cache_forgets_glyphs_but_not_how_to_draw_them() {
+        let mut r = renderer();
+        let mut first = transparent(120, 40);
+        r.draw(&mut first, "12:34", 10.0, 28.0, 20.0, Color::WHITE)
+            .expect("dibuja");
+        assert_eq!(r.cached_glyphs(), 5);
+
+        r.clear_cache();
+        assert_eq!(r.cached_glyphs(), 0);
+
+        let mut again = transparent(120, 40);
+        r.draw(&mut again, "12:34", 10.0, 28.0, 20.0, Color::WHITE)
+            .expect("dibuja");
+        assert_eq!(first, again, "se rasteriza igual que antes");
     }
 
     #[test]

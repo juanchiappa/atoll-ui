@@ -26,6 +26,13 @@
 
 - **Quién dibuja qué (`Painter`):** el backend de la plataforma no sabe qué se ve en la isla. Recibe un `Box<dyn Painter>` y le pide un `Frame` cada vez que hay que mostrar algo: al abrir, en cada cuadro de la animación y cuando cambia el minuto. El Core implementa el `Painter` (`atoll-core::island::IslandPainter`: hora, fecha, layout). Así los plugins podrán pintar contenido en la isla (ítem 11) sin tocar el código de ventana, y la lógica de contenido se prueba en cualquier SO.
 
+- **Escalado DPI por monitor:** las medidas de la configuración (`IslandConfig`) y del `Painter` (tamaño de letra, separaciones) son **lógicas**, a 96 DPI. El backend las multiplica por el factor de escala del monitor (`atoll_platform::dpi`: 120 DPI = 1,25) y le pasa al `Painter` el tamaño físico y la escala. Así la isla mide lo mismo en pantalla y se rasteriza nítida con cualquier escalado, en lugar de que Windows estire un bitmap.
+  - En Windows el proceso es Per-Monitor-V2 (`SetProcessDpiAwarenessContext`). Si el SO no lo soporta (anterior a Windows 10 1703) se usa el DPI del sistema, sin escalado dinámico.
+  - El DPI inicial se lee de la propia ventana (`GetDpiForWindow`) antes de mostrarla, creada en el origen de la pantalla principal.
+  - `WM_DPICHANGED` y `WM_DISPLAYCHANGE` recalculan tamaños físicos, margen superior y animador, y redibujan **una sola vez**. El cambio de tamaño es instantáneo (`Animator::resize`: cancela la animación en curso y conserva si el mouse está encima), así que no hace falta ningún timer nuevo.
+  - La caché de glifos se vacía cuando cambia la escala (`TextRenderer::clear_cache`): los glifos del tamaño anterior no se vuelven a pedir.
+  - La isla vive en el monitor principal. Soportar otros monitores es una decisión futura.
+
 - **Reloj y excepción a la regla de timers:** la isla muestra `HH:MM` en reposo y, con hover, la hora y la fecha (`sáb 7 nov`). La hora local sale de `GetLocalTime` (sin crates de fechas) detrás de `atoll_platform::local_time()`. La regla "los timers solo existen durante una animación" tiene **una sola excepción**: UN timer de un solo disparo por minuto.
   - Se arma con los milisegundos que faltan hasta el próximo cambio de minuto (`LocalTime::millis_until_next_minute`) más 20 ms de margen, para no saltar antes de tiempo.
   - Al dispararse se apaga lo primero, se redibuja **solo si el minuto cambió** (se compara con la hora del último cuadro dibujado) y se vuelve a armar. No hay polling ni intervalos fijos: en reposo, un despertar por minuto y nada más.
