@@ -12,6 +12,7 @@ pub use clock::{local_time, LocalTime};
 
 pub mod animation;
 pub mod clock;
+pub mod dpi;
 
 #[cfg(windows)]
 mod windows;
@@ -46,13 +47,16 @@ impl Os {
 }
 
 /// Configuración de la ventana de la isla.
+///
+/// Todas las medidas son **lógicas**: píxeles a 96 DPI (100 % de escala). El
+/// backend las multiplica por el factor de escala del monitor (ver [`dpi`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IslandConfig {
-    /// Tamaño de la isla en reposo.
+    /// Tamaño lógico de la isla en reposo.
     pub size: Size,
-    /// Tamaño de la isla cuando el mouse está encima.
+    /// Tamaño lógico de la isla cuando el mouse está encima.
     pub hover_size: Size,
-    /// Separación en píxeles entre el borde superior de la pantalla y la isla.
+    /// Separación lógica entre el borde superior de la pantalla y la isla.
     pub top_margin: u32,
 }
 
@@ -99,13 +103,18 @@ impl std::error::Error for PlatformError {}
 /// Dibuja el contenido de la isla.
 ///
 /// El backend lo llama cada vez que hay que mostrar algo nuevo: al abrir, en cada
-/// cuadro de la animación de hover y cuando cambia el minuto. Quién implementa
-/// este trait decide qué se ve; el backend solo lo entrega al sistema operativo.
+/// cuadro de la animación de hover, cuando cambia el minuto y cuando cambia el
+/// DPI del monitor. Quién implementa este trait decide qué se ve; el backend
+/// solo lo entrega al sistema operativo.
 pub trait Painter {
-    /// Dibuja la isla con el tamaño `size` y la hora `time`.
+    /// Dibuja la isla con la hora `time`.
+    ///
+    /// `size` es el tamaño **físico** del cuadro, en píxeles. `scale` es el factor
+    /// de escala del monitor (1,0 = 100 %, 1,5 = 150 %): sirve para escalar texto
+    /// y separaciones, que se definen en píxeles lógicos.
     ///
     /// Devuelve `None` si no se pudo dibujar.
-    fn paint(&mut self, size: Size, time: LocalTime) -> Option<Frame>;
+    fn paint(&mut self, size: Size, scale: f32, time: LocalTime) -> Option<Frame>;
 }
 
 /// Backend nativo de un sistema operativo.
@@ -118,11 +127,12 @@ pub trait Backend {
     /// Al pasar el mouse la isla se expande a `config.hover_size` con una
     /// animación, y vuelve a su tamaño al sacarlo. El backend mantiene un único
     /// timer de un solo disparo, alineado al cambio de minuto, para redibujar la hora.
+    /// Si cambia el DPI del monitor, recalcula los tamaños físicos y vuelve a dibujar.
     ///
     /// # Errors
     ///
     /// Devuelve [`PlatformError`] si el sistema operativo rechaza alguna llamada
-    /// o si el primer cuadro no tiene el tamaño de `config.size`.
+    /// o si el primer cuadro no tiene el tamaño de `config.size` escalado.
     fn run(
         &mut self,
         config: &IslandConfig,

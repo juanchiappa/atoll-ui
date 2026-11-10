@@ -33,8 +33,8 @@ Referencia: Hecho / En revisión / Pendiente.
 | 6 | Protección de `main`: PR obligatorio y los 3 checks requeridos | Hecho |
 | 7 | Animación de hover: la isla pasa de 400x40 a 480x64 y vuelve, con timer efímero (#3) | Hecho |
 | 8 | Primitiva de texto en `atoll-render` (#5) | Hecho |
-| 9 | Reloj en la isla | En revisión |
-| 10 | Escalado DPI por monitor | Pendiente |
+| 9 | Reloj en la isla (#6) | Hecho |
+| 10 | Escalado DPI por monitor | En revisión |
 | 11 | Protocolo IPC y host de plugins | Pendiente |
 | 12 | Backend de Linux (Wayland primero) | Pendiente |
 | 13 | Backend de macOS | Pendiente |
@@ -58,7 +58,7 @@ La numeración de los ítems 1 a 6 se reconstruyó desde el historial de git. Si
 - **Aceptación:** tests de píxeles (cobertura, color, recorte, caché), fmt, clippy y tests en verde en los 3 SO,
   RAM en reposo en Windows <= 8 MB.
 
-### 9. Reloj en la isla (en revisión)
+### 9. Reloj en la isla (hecho)
 
 - La hora local sale de `GetLocalTime` (Windows). Sin crates de fechas.
 - El backend recibe un `Painter` (trait en `atoll-platform`) y el Core pinta el contenido (`IslandPainter`).
@@ -70,11 +70,16 @@ La numeración de los ítems 1 a 6 se reconstruyó desde el historial de git. Si
 - La animación de hover tiene que seguir funcionando con el texto adentro.
 - **Aceptación:** CPU en reposo 0,00 medido; la hora cambia exactamente al minuto; RAM <= 8 MB.
 
-### 10. Escalado DPI por monitor
+### 10. Escalado DPI por monitor (en revisión)
 
-- Per-Monitor-V2 (`WM_DPICHANGED`): recalcular tamaño de isla y de fuente, e invalidar la caché de glifos
-  al cambiar el factor.
-- **Aceptación:** misma isla, mismo tamaño físico y nítida en dos monitores con DPI distinto; sin render loop.
+- Las medidas de `IslandConfig` pasan a ser **lógicas** (96 DPI). El backend las multiplica por el factor de
+  escala del monitor (`atoll_platform::dpi`), y el `Painter` recibe el tamaño físico y la escala.
+- Per-Monitor-V2: `WM_DPICHANGED` y `WM_DISPLAYCHANGE` recalculan tamaños físicos, margen y animador
+  (`Animator::resize`, sin animar, conservando el hover) y redibujan una sola vez. Se invalida la caché de glifos.
+- Windows anteriores a 1703 caen a DPI del sistema (sin escalado dinámico).
+- **Aceptación:** misma isla, mismo tamaño físico y nítida con 100, 125, 150 y 200 % de escala y en dos monitores
+  con DPI distinto; cambiar el escalado en Configuración reacomoda la isla sin reiniciar; sin render loop ni
+  timers nuevos; CPU en reposo 0,00.
 
 ### 11. Protocolo IPC y host de plugins
 

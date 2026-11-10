@@ -10,6 +10,12 @@
 //! isla se está moviendo**: arranca cuando el mouse entra o sale y se apaga
 //! apenas la animación termina.
 //!
+//! La isla es *Per-Monitor-V2 DPI aware*: las medidas de la configuración son
+//! lógicas (96 DPI) y se multiplican por el factor de escala del monitor, para que
+//! la isla mida lo mismo y se vea nítida con cualquier escalado. Si cambia el DPI
+//! (`WM_DPICHANGED`) o la disposición de pantallas (`WM_DISPLAYCHANGE`), se
+//! recalculan los tamaños y se redibuja una sola vez. Sin timers ni polling.
+//!
 //! Única excepción: el reloj. Hay UN timer de un solo disparo, alineado al
 //! próximo cambio de minuto. Cuando salta se apaga, se redibuja solo si el
 //! minuto cambió y se vuelve a armar con los milisegundos que faltan. No hay
@@ -29,6 +35,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
@@ -38,12 +47,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetCoalescableTimer, SetProcessDPIAware, SetTimer, ShowWindow, TranslateMessage,
     UnregisterClassW, UpdateLayeredWindow, IDC_ARROW, MSG, PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND, SM_CXSCREEN, SW_SHOWNOACTIVATE, TIMERV_NO_COALESCING, ULW_ALPHA,
-    WM_DESTROY, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMECHANGE, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP,
+    WM_TIMECHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::animation::Animator;
 use crate::clock::{local_time, LocalTime};
+use crate::dpi::{scale_for_dpi, scale_px, scale_size};
 use crate::{Backend, IslandConfig, Painter, PlatformError};
 
 /// Nombre de la clase de ventana registrada en Win32.
@@ -80,8 +91,12 @@ thread_local! {
     /// Estado de la animación. El loop de mensajes corre en un solo hilo, así
     /// que alcanza con un `Cell` (y evita pánicos por reentrada del `RefCell`).
     static ANIMATOR: Cell<Option<Animator>> = const { Cell::new(None) };
-    /// Margen superior de la isla, en píxeles.
+    /// Margen superior de la isla, en píxeles físicos (ya escalado).
     static TOP_MARGIN: Cell<i32> = const { Cell::new(0) };
+    /// Configuración lógica de la isla, para recalcular tamaños cuando cambia el DPI.
+    static CONFIG: Cell<Option<IslandConfig>> = const { Cell::new(None) };
+    /// Factor de escala actual del monitor (1,0 = 100 %).
+    static SCALE: Cell<f32> = const { Cell::new(1.0) };
     /// Quien dibuja el contenido de la isla. Se saca del `Cell` mientras dibuja
     /// y se vuelve a guardar, para no depender de préstamos entre mensajes.
     static PAINTER: Cell<Option<Box<dyn Painter>>> = const { Cell::new(None) };
@@ -105,6 +120,7 @@ impl Backend for WindowsBackend {
         PAINTER.set(None);
         ANIMATOR.set(None);
         LAST_DRAWN.set(None);
+        CONFIG.set(None);
         result
     }
 }
@@ -141,22 +157,15 @@ fn island_origin(width: u32) -> (i32, i32) {
 ///
 /// Debe llamarse desde un único hilo, que pasa a ser el dueño de la ventana.
 unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
-    // Primer cuadro: se dibuja antes de crear la ventana para fallar rápido si no coincide.
-    let (frame, first_time) = paint(config.size).ok_or(PlatformError::InvalidFrame)?;
-    if frame.size() != config.size {
-        return Err(PlatformError::InvalidFrame);
+    CONFIG.set(Some(*config));
+
+    // SAFETY: sin precondiciones. Per-Monitor-V2: Windows no escala la ventana y
+    // avisa con `WM_DPICHANGED` cuando cambia el DPI.
+    if unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } == 0 {
+        // Windows más viejo (o ya configurado por manifiesto): se usa el DPI del sistema.
+        // SAFETY: sin precondiciones.
+        unsafe { SetProcessDPIAware() };
     }
-
-    TOP_MARGIN.set(to_i32(config.top_margin));
-    ANIMATOR.set(Some(Animator::new(
-        config.size,
-        config.hover_size,
-        ANIMATION_DURATION,
-        Instant::now(),
-    )));
-
-    // SAFETY: sin precondiciones; evita que Windows escale la ventana.
-    unsafe { SetProcessDPIAware() };
 
     // SAFETY: con puntero nulo devuelve el módulo del ejecutable actual.
     let hinstance = unsafe { GetModuleHandleW(null()) };
@@ -183,8 +192,9 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
         return Err(os_error("RegisterClassExW"));
     }
 
-    let (left, top) = island_origin(config.size.width);
-
+    // La ventana nace en el origen de la pantalla principal, todavía sin mostrarse: sirve
+    // para preguntarle a Windows el DPI de ese monitor. Su tamaño y posición definitivos
+    // los fija `UpdateLayeredWindow` al presentar el primer cuadro.
     // SAFETY: la clase ya está registrada y los punteros son válidos.
     let hwnd = unsafe {
         CreateWindowExW(
@@ -192,8 +202,8 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
             class_name.as_ptr(),
             class_name.as_ptr(),
             WS_POPUP,
-            left,
-            top,
+            0,
+            0,
             to_i32(config.size.width),
             to_i32(config.size.height),
             null_mut(),
@@ -210,14 +220,31 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
     }
 
     // SAFETY: `hwnd` es válido y pertenece a este hilo.
-    if let Err(err) = unsafe { present_frame(hwnd, left, top, &frame) } {
-        // SAFETY: `hwnd` es válido; la clase fue registrada arriba.
-        unsafe {
-            DestroyWindow(hwnd);
-            UnregisterClassW(class_name.as_ptr(), hinstance);
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    apply_scale(config, scale_for_dpi(dpi));
+
+    // Primer cuadro, al tamaño físico que corresponde a este monitor.
+    let first_size = scale_size(config.size, SCALE.get());
+    let first = match paint(first_size) {
+        Some((frame, time)) if frame.size() == first_size => Ok((frame, time)),
+        _ => Err(PlatformError::InvalidFrame),
+    };
+    let (left, top) = island_origin(first_size.width);
+    let presented = first.and_then(|(frame, time)| {
+        // SAFETY: `hwnd` es válido y pertenece a este hilo.
+        unsafe { present_frame(hwnd, left, top, &frame) }.map(|()| time)
+    });
+    let first_time = match presented {
+        Ok(time) => time,
+        Err(err) => {
+            // SAFETY: `hwnd` es válido; la clase fue registrada arriba.
+            unsafe {
+                DestroyWindow(hwnd);
+                UnregisterClassW(class_name.as_ptr(), hinstance);
+            }
+            return Err(err);
         }
-        return Err(err);
-    }
+    };
 
     LAST_DRAWN.set(Some(first_time));
 
@@ -406,7 +433,7 @@ unsafe fn on_timer(hwnd: HWND) {
 fn paint(size: Size) -> Option<(Frame, LocalTime)> {
     let time = local_time().ok()?;
     let mut painter = PAINTER.take()?;
-    let frame = painter.paint(size, time);
+    let frame = painter.paint(size, SCALE.get(), time);
     PAINTER.set(Some(painter));
     frame.map(|frame| (frame, time))
 }
@@ -474,6 +501,42 @@ unsafe fn on_clock(hwnd: HWND) {
     unsafe { arm_clock(hwnd) };
 }
 
+/// Aplica un factor de escala: guarda el factor, escala el margen y recalcula los
+/// tamaños físicos del animador, conservando si el mouse está encima.
+fn apply_scale(config: &IslandConfig, scale: f32) {
+    SCALE.set(scale);
+    TOP_MARGIN.set(to_i32(scale_px(config.top_margin, scale)));
+    let collapsed = scale_size(config.size, scale);
+    let expanded = scale_size(config.hover_size, scale);
+    let animator = match ANIMATOR.get() {
+        Some(mut animator) => {
+            animator.resize(collapsed, expanded);
+            animator
+        }
+        None => Animator::new(collapsed, expanded, ANIMATION_DURATION, Instant::now()),
+    };
+    ANIMATOR.set(Some(animator));
+}
+
+/// Cambió el DPI del monitor, o la disposición de pantallas: se recalcula la escala
+/// y se redibuja una sola vez, ya en el tamaño y la posición nuevos.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_dpi_changed(hwnd: HWND, dpi: u32) {
+    let Some(config) = CONFIG.get() else {
+        return;
+    };
+    apply_scale(&config, scale_for_dpi(dpi));
+    // El cambio de tamaño es instantáneo: si había una animación en curso, ya no hace falta.
+    // SAFETY: `hwnd` es válido.
+    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+    if let Some(animator) = ANIMATOR.get() {
+        draw_step(hwnd, animator.size());
+    }
+}
+
 /// Procedimiento de ventana: reacciona a cada evento que manda Windows.
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
@@ -500,6 +563,19 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if wparam == CLOCK_TIMER => {
             // SAFETY: ídem.
             unsafe { on_clock(hwnd) };
+            0
+        }
+        // Cambió el DPI del monitor (el DPI nuevo viene en la palabra baja de `wparam`).
+        WM_DPICHANGED => {
+            let dpi = u32::try_from(wparam & 0xFFFF).unwrap_or(0);
+            // SAFETY: ídem.
+            unsafe { on_dpi_changed(hwnd, dpi) };
+            0
+        }
+        // Cambió la resolución o la disposición de monitores: se reubica la isla.
+        WM_DISPLAYCHANGE => {
+            // SAFETY: ídem.
+            unsafe { on_dpi_changed(hwnd, GetDpiForWindow(hwnd)) };
             0
         }
         // Cambió la hora del sistema: se re-sincroniza el reloj.
