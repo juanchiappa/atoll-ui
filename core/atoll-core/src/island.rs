@@ -1,14 +1,20 @@
-//! Contenido de la isla: la hora y, al pasar el mouse, la fecha.
+//! Contenido de la isla: la hora, la fecha al pasar el mouse y la aplicación de temas.
 //!
 //! El backend de la plataforma llama a [`IslandPainter`] cada vez que hay que
-//! dibujar. Acá se decide qué se ve y dónde; el backend solo lo entrega al SO.
+//! dibujar o cuando cambia `config.ini` en disco. Acá se decide qué se ve y dónde;
+//! el backend solo lo entrega al SO.
 //!
-//! Las medidas de este módulo (tamaño de letra, separaciones) están en píxeles
-//! lógicos, a 96 DPI. Al dibujar se multiplican por el factor de escala del monitor.
+//! Las medidas de este módulo (tamaño de letra, separaciones, radio de esquina)
+//! están en píxeles lógicos, a 96 DPI. Al dibujar se multiplican por el factor de
+//! escala del monitor.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use atoll_config::{Color as ConfigColor, Config, CornerRadius, Warning};
 use atoll_platform::dpi::scale_px;
-use atoll_platform::{LocalTime, Painter};
-use atoll_render::{render_island, Color, Frame, RenderError, Size, TextRenderer};
+use atoll_platform::{IslandConfig, LocalTime, Painter};
+use atoll_render::{render_island_with, Color, Frame, RenderError, Size, TextRenderer};
 
 /// Días de la semana abreviados, empezando por el domingo.
 const WEEKDAYS: [&str; 7] = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
@@ -33,9 +39,6 @@ const CAP_HEIGHT: f32 = 0.7275;
 /// Separación entre la hora y la fecha, en píxeles lógicos.
 const LINE_GAP: f32 = 8.0;
 
-/// Color de la hora.
-const TIME_COLOR: Color = Color::WHITE;
-
 /// Opacidad máxima de la fecha (0 a 255), cuando la isla está totalmente expandida.
 const DATE_ALPHA: f32 = 190.0;
 
@@ -56,31 +59,137 @@ pub fn format_date(time: &LocalTime) -> String {
     format!("{weekday} {} {month}", time.day)
 }
 
-/// Dibuja la isla con la hora, y la fecha que aparece al expandirse.
+/// Construye [`IslandConfig`] a partir de [`Config`] y la carpeta opcional de recarga en vivo.
+#[must_use]
+pub fn island_config_from(config: &Config, config_dir: Option<PathBuf>) -> IslandConfig {
+    let base = IslandConfig::new(
+        Size::new(config.island.width, config.island.height),
+        Size::new(config.island.hover_width, config.island.hover_height),
+        config.island.top_margin,
+    );
+    match config_dir {
+        Some(dir) => base.with_config_dir(dir),
+        None => base,
+    }
+}
+
+/// Combina un color de configuración (`#RRGGBB` / `#RRGGBBAA`) con el porcentaje de
+/// opacidad general (`0..=100`) y devuelve el [`Color`] efectivo para el render.
+#[must_use]
+pub fn effective_color(color: ConfigColor, opacity: u8) -> Color {
+    let pct = u32::from(opacity.min(100));
+    let alpha = ((u32::from(color.a) * pct + 50) / 100).min(255) as u8;
+    Color::rgba(color.r, color.g, color.b, alpha)
+}
+
+/// Convierte el radio lógico de configuración a píxeles físicos según `scale`.
+///
+/// Devuelve `None` cuando es [`CornerRadius::Auto`] (píldora).
+#[must_use]
+pub fn physical_corner_radius(radius: CornerRadius, scale: f32) -> Option<f32> {
+    match radius {
+        CornerRadius::Auto => None,
+        CornerRadius::Px(px) => Some((px as f32) * scale),
+    }
+}
+
+/// Imprime en `stderr` todas las advertencias producidas por el parser de configuración.
+pub fn report_warnings(warnings: &[Warning]) {
+    for warning in warnings {
+        eprintln!("atoll: config.ini ({warning})");
+    }
+}
+
+/// Carga `config.ini` desde `file` o lo crea (junto con `dir`) con los valores por defecto.
+///
+/// Nunca falla: si no se puede crear o leer, usa [`Config::default`]; si tiene advertencias,
+/// las escribe en `stderr`.
+#[must_use]
+pub fn load_or_create_config(dir: &Path, file: &Path) -> Config {
+    if !file.exists() {
+        if fs::create_dir_all(dir).is_ok() {
+            let _ = fs::write(file, Config::default().to_text());
+        }
+        return Config::default();
+    }
+    let Ok(text) = fs::read_to_string(file) else {
+        return Config::default();
+    };
+    let (config, warnings) = atoll_config::parse(&text);
+    report_warnings(&warnings);
+    config
+}
+
+/// Dibuja la isla con la hora y la fecha, aplicando el tema y los tamaños de [`Config`].
 #[derive(Debug)]
 pub struct IslandPainter {
     text: TextRenderer,
-    /// Tamaño lógico de la isla en reposo.
-    collapsed: Size,
-    /// Tamaño lógico de la isla expandida.
-    expanded: Size,
+    config: Config,
+    config_dir: Option<PathBuf>,
+    config_file: Option<PathBuf>,
     /// Escala con la que se dibujó el último cuadro (bits del `f32`), para saber cuándo cambia.
     last_scale: u32,
 }
 
 impl IslandPainter {
-    /// Crea el painter para una isla que va de `collapsed` a `expanded` (tamaños lógicos).
+    /// Crea el painter para una isla con tamaños lógicos `collapsed` y `expanded` y el tema por defecto.
     ///
     /// # Errors
     ///
     /// Devuelve [`RenderError`] si no se puede cargar la fuente embebida.
+    #[allow(dead_code)]
     pub fn new(collapsed: Size, expanded: Size) -> Result<Self, RenderError> {
+        let mut config = Config::default();
+        config.island.width = collapsed.width;
+        config.island.height = collapsed.height;
+        config.island.hover_width = expanded.width;
+        config.island.hover_height = expanded.height;
+        Self::from_config(config, None, None)
+    }
+
+    /// Crea el painter a partir de una [`Config`] completa y las rutas opcionales de recarga en vivo.
+    ///
+    /// # Errors
+    ///
+    /// Devuelve [`RenderError`] si no se puede cargar la fuente embebida.
+    pub fn from_config(
+        config: Config,
+        config_dir: Option<PathBuf>,
+        config_file: Option<PathBuf>,
+    ) -> Result<Self, RenderError> {
         Ok(Self {
             text: TextRenderer::new()?,
-            collapsed,
-            expanded,
+            config,
+            config_dir,
+            config_file,
             last_scale: 1.0_f32.to_bits(),
         })
+    }
+
+    /// Configuración actual aplicada en el painter.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Aplica `next` únicamente si es distinta de la [`Config`] actual.
+    ///
+    /// Si cambió, actualiza la configuración interna y devuelve `Some(IslandConfig)`
+    /// con las nuevas medidas lógicas; si es idéntica, devuelve `None`.
+    pub fn apply_config_if_changed(&mut self, next: Config) -> Option<IslandConfig> {
+        if next == self.config {
+            return None;
+        }
+        self.config = next;
+        Some(island_config_from(&self.config, self.config_dir.clone()))
+    }
+
+    /// Parsea `text` y aplica la nueva [`Config`] solo si cambió respecto de la actual.
+    pub fn reload_from_text(&mut self, text: &str) -> (Option<IslandConfig>, Vec<Warning>) {
+        let (parsed, warnings) = atoll_config::parse(text);
+        let updated = self.apply_config_if_changed(parsed);
+        (updated, warnings)
     }
 
     /// Qué tan expandida está la isla: 0,0 en reposo y 1,0 con hover.
@@ -88,8 +197,8 @@ impl IslandPainter {
     /// `size` es el tamaño físico del cuadro; los tamaños de reposo y expandido se
     /// escalan con `scale` para compararlos en las mismas unidades.
     fn progress(&self, size: Size, scale: f32) -> f32 {
-        let collapsed = scale_px(self.collapsed.height, scale);
-        let expanded = scale_px(self.expanded.height, scale);
+        let collapsed = scale_px(self.config.island.height, scale);
+        let expanded = scale_px(self.config.island.hover_height, scale);
         let span = expanded.saturating_sub(collapsed);
         if span == 0 {
             return 0.0;
@@ -112,7 +221,11 @@ impl IslandPainter {
             self.last_scale = scale.to_bits();
         }
 
-        let mut frame = render_island(size)?;
+        let appearance = self.config.appearance;
+        let bg_color = effective_color(appearance.background, appearance.opacity);
+        let radius = physical_corner_radius(appearance.corner_radius, scale);
+        let mut frame = render_island_with(size, bg_color, radius)?;
+
         let progress = self.progress(size, scale);
         let width = size.width as f32;
         let height = size.height as f32;
@@ -130,6 +243,7 @@ impl IslandPainter {
         let expanded_baseline = (height - block) / 2.0 + time_cap;
         let time_baseline = rest_baseline + (expanded_baseline - rest_baseline) * progress;
 
+        let text_color = effective_color(appearance.text_color, appearance.opacity);
         let time_text = format_time(time);
         let time_width = self.text.measure(&time_text, time_px)?;
         self.text.draw(
@@ -138,22 +252,28 @@ impl IslandPainter {
             (width - time_width) / 2.0,
             time_baseline,
             time_px,
-            TIME_COLOR,
+            text_color,
         )?;
 
         // La fecha aparece con la expansión: transparente en reposo, visible con hover.
-        let alpha = (progress * DATE_ALPHA).round();
+        let max_date_alpha = f32::from(text_color.a) * (DATE_ALPHA / 255.0);
+        let alpha = (progress * max_date_alpha).round();
         if alpha >= 1.0 {
             let date_text = format_date(time);
             let date_width = self.text.measure(&date_text, date_px)?;
-            let color = Color::rgba(255, 255, 255, alpha as u8);
+            let date_color = Color::rgba(
+                text_color.r,
+                text_color.g,
+                text_color.b,
+                (alpha as u32).min(255) as u8,
+            );
             self.text.draw(
                 &mut frame,
                 &date_text,
                 (width - date_width) / 2.0,
                 time_baseline + line_gap + date_cap,
                 date_px,
-                color,
+                date_color,
             )?;
         }
         Ok(frame)
@@ -164,13 +284,29 @@ impl Painter for IslandPainter {
     fn paint(&mut self, size: Size, scale: f32, time: LocalTime) -> Option<Frame> {
         self.draw(size, scale, &time).ok()
     }
+
+    fn reload_config(&mut self) -> Option<IslandConfig> {
+        let path = self.config_file.as_ref()?;
+        // Si el archivo está bloqueado, a medio escribir o fue borrado, conservamos la actual.
+        let text = fs::read_to_string(path).ok()?;
+        let (updated, warnings) = self.reload_from_text(&text);
+        report_warnings(&warnings);
+        updated
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_date, format_time, IslandPainter};
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{
+        effective_color, format_date, format_time, island_config_from, load_or_create_config,
+        physical_corner_radius, IslandPainter,
+    };
+    use atoll_config::{Color as ConfigColor, Config, CornerRadius, Theme};
     use atoll_platform::{LocalTime, Painter};
-    use atoll_render::{Frame, Size};
+    use atoll_render::{Color, Frame, Size};
 
     const REST: Size = Size::new(400, 40);
     const HOVER: Size = Size::new(480, 64);
@@ -437,5 +573,125 @@ mod tests {
         let faint = brightest(&middle, 54..78);
         let strong = brightest(&full, 54..96);
         assert!(faint > 0 && faint < strong, "{faint} < {strong}");
+    }
+
+    #[test]
+    fn maps_config_to_island_config_and_appearance_correctly() {
+        let (cfg, warnings) = atoll_config::parse(
+            "
+[island]
+width = 440
+height = 48
+hover_width = 560
+hover_height = 76
+top_margin = 14
+
+[appearance]
+theme = graphite
+opacity = 50
+corner_radius = 12
+",
+        );
+        assert!(warnings.is_empty());
+
+        let dir = PathBuf::from("C:\\Users\\test\\AppData\\Roaming\\Atoll");
+        let island_cfg = island_config_from(&cfg, Some(dir.clone()));
+        assert_eq!(island_cfg.size, Size::new(440, 48));
+        assert_eq!(island_cfg.hover_size, Size::new(560, 76));
+        assert_eq!(island_cfg.top_margin, 14);
+        assert_eq!(island_cfg.config_dir, Some(dir));
+
+        let eff_bg = effective_color(cfg.appearance.background, cfg.appearance.opacity);
+        assert_eq!(eff_bg, Color::rgba(0x1C, 0x1C, 0x1E, 128));
+        assert_eq!(
+            physical_corner_radius(cfg.appearance.corner_radius, 1.5),
+            Some(18.0)
+        );
+        assert_eq!(physical_corner_radius(CornerRadius::Auto, 2.0), None);
+    }
+
+    #[test]
+    fn custom_appearance_paints_premultiplied_colors_and_radius() {
+        let mut appearance = Theme::White.appearance();
+        appearance.background = ConfigColor::rgb(200, 100, 50);
+        appearance.opacity = 50;
+        appearance.corner_radius = CornerRadius::Px(0);
+        let cfg = Config {
+            appearance,
+            ..Config::default()
+        };
+
+        let mut p = IslandPainter::from_config(cfg, None, None).expect("painter");
+        let frame = paint(&mut p, HOVER, saturday());
+
+        // Con corner_radius = 0, la esquina (0, 0) forma parte del fondo con opacidad 50 %.
+        let corner = pixel(&frame, 0, 0);
+        assert_eq!(corner[3], 128);
+        assert!((i16::from(corner[0]) - 100).abs() <= 1);
+        assert!((i16::from(corner[1]) - 50).abs() <= 1);
+        assert!((i16::from(corner[2]) - 25).abs() <= 1);
+
+        // Todos los píxeles del cuadro mantienen alfa premultiplicado válido (c <= a).
+        let (pixels, _) = frame.rgba_premultiplied().as_chunks::<4>();
+        for &[r, g, b, a] in pixels {
+            assert!(
+                r <= a && g <= a && b <= a,
+                "premultiplicado inválido: {r},{g},{b},{a}"
+            );
+        }
+    }
+
+    #[test]
+    fn reload_applies_only_when_config_actually_changed() {
+        let mut p = painter();
+        let same_text = Config::default().to_text();
+        let (unchanged, w1) = p.reload_from_text(&same_text);
+        assert!(w1.is_empty());
+        assert!(
+            unchanged.is_none(),
+            "si la configuración es igual no debe pedir redibujar"
+        );
+
+        let changed_text =
+            "[island]\nwidth = 440\nhover_width = 520\n[appearance]\ntheme = white\n";
+        let (updated, w2) = p.reload_from_text(changed_text);
+        assert!(w2.is_empty());
+        let new_island_cfg = updated.expect("cambió la configuración");
+        assert_eq!(new_island_cfg.size, Size::new(440, 40));
+        assert_eq!(new_island_cfg.hover_size, Size::new(520, 64));
+        assert_eq!(p.config().appearance.theme, Theme::White);
+
+        // Reaplicar exactamente el mismo texto vuelve a dar `None`.
+        let (again, w3) = p.reload_from_text(changed_text);
+        assert!(w3.is_empty());
+        assert!(again.is_none());
+    }
+
+    #[test]
+    fn missing_or_deleted_config_file_is_handled_gracefully() {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push(format!("atoll_test_config_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let file = temp_dir.join("config.ini");
+
+        // Si no existe, `load_or_create_config` lo crea con los valores por defecto.
+        let initial = load_or_create_config(&temp_dir, &file);
+        assert_eq!(initial, Config::default());
+        assert!(file.exists());
+
+        let mut p = IslandPainter::from_config(initial, Some(temp_dir.clone()), Some(file.clone()))
+            .expect("painter");
+
+        // Editamos el archivo en disco y recargamos.
+        fs::write(&file, "[appearance]\ntheme = graphite\n").expect("escribe");
+        assert!(p.reload_config().is_some());
+        assert_eq!(p.config().appearance.theme, Theme::Graphite);
+
+        // Si se borra el archivo con la isla abierta, `reload_config` conserva lo último aplicado.
+        fs::remove_file(&file).expect("borra");
+        assert!(p.reload_config().is_none());
+        assert_eq!(p.config().appearance.theme, Theme::Graphite);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

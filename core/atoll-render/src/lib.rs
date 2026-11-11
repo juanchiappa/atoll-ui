@@ -92,31 +92,58 @@ impl Frame {
     }
 }
 
-/// Dibuja la isla: una píldora negra con bordes suavizados sobre fondo transparente.
+/// Dibuja la isla por defecto: una píldora negra opaca con bordes suavizados.
 ///
 /// # Errors
 ///
 /// Devuelve [`RenderError::InvalidSize`] si el ancho o el alto son cero, o
 /// [`RenderError::InvalidShape`] si no se puede construir la forma.
 pub fn render_island(size: Size) -> Result<Frame, RenderError> {
+    render_island_with(size, Color::BLACK, None)
+}
+
+/// Dibuja la isla con el color de fondo (incluyendo su alfa) y el radio de esquina dados.
+///
+/// Si `corner_radius` es `None`, usa forma de píldora (`min(ancho, alto) / 2`).
+/// Si es `Some(r)`, el radio en píxeles físicos se acota a `0.0..=(min(ancho, alto) / 2)`.
+/// El [`Frame`] devuelto tiene alfa premultiplicado listo para entregar al SO.
+///
+/// # Errors
+///
+/// Devuelve [`RenderError::InvalidSize`] si el ancho o el alto son cero, o
+/// [`RenderError::InvalidShape`] si no se puede construir la forma.
+pub fn render_island_with(
+    size: Size,
+    color: Color,
+    corner_radius: Option<f32>,
+) -> Result<Frame, RenderError> {
     let mut pixmap = Pixmap::new(size.width, size.height).ok_or(RenderError::InvalidSize(size))?;
 
     let width = size.width as f32;
     let height = size.height as f32;
-    let radius = width.min(height) / 2.0;
+    let max_radius = width.min(height) / 2.0;
+    let radius = corner_radius.map_or(max_radius, |r| {
+        if r.is_finite() {
+            r.clamp(0.0, max_radius)
+        } else {
+            max_radius
+        }
+    });
     let path = rounded_rect(width, height, radius).ok_or(RenderError::InvalidShape)?;
 
-    let mut paint = Paint::default();
-    paint.set_color_rgba8(0, 0, 0, 255);
-    paint.anti_alias = true;
+    if color.a > 0 {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+        paint.anti_alias = true;
 
-    pixmap.fill_path(
-        &path,
-        &paint,
-        FillRule::Winding,
-        Transform::identity(),
-        None,
-    );
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
 
     Ok(Frame {
         size,
@@ -126,11 +153,20 @@ pub fn render_island(size: Size) -> Result<Frame, RenderError> {
 
 /// Rectángulo con esquinas redondeadas; con `radius = min(w, h) / 2` es una píldora.
 fn rounded_rect(width: f32, height: f32, radius: f32) -> Option<Path> {
+    let mut builder = PathBuilder::new();
+    if radius <= 0.0 {
+        builder.move_to(0.0, 0.0);
+        builder.line_to(width, 0.0);
+        builder.line_to(width, height);
+        builder.line_to(0.0, height);
+        builder.close();
+        return builder.finish();
+    }
+
     /// Constante para aproximar un cuarto de círculo con una curva cúbica.
     const KAPPA: f32 = 0.552_284_7;
     let k = radius * KAPPA;
 
-    let mut builder = PathBuilder::new();
     builder.move_to(radius, 0.0);
     builder.line_to(width - radius, 0.0);
     builder.cubic_to(width - radius + k, 0.0, width, radius - k, width, radius);
@@ -160,12 +196,18 @@ fn rounded_rect(width: f32, height: f32, radius: f32) -> Option<Path> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_island, Frame, RenderError, Size};
+    use super::{render_island, render_island_with, Color, Frame, RenderError, Size};
+
+    /// Píxel RGBA premultiplicado en (x, y).
+    fn pixel(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
+        let index = ((y * frame.size().width + x) * 4) as usize;
+        let px = &frame.rgba_premultiplied()[index..index + 4];
+        [px[0], px[1], px[2], px[3]]
+    }
 
     /// Alfa del píxel (x, y) de un frame.
     fn alpha(frame: &Frame, x: u32, y: u32) -> u8 {
-        let index = ((y * frame.size().width + x) * 4 + 3) as usize;
-        frame.rgba_premultiplied()[index]
+        pixel(frame, x, y)[3]
     }
 
     #[test]
@@ -187,6 +229,56 @@ mod tests {
         let (pixels, _) = frame.rgba_premultiplied().as_chunks::<4>();
         let partial = pixels.iter().filter(|px| px[3] > 0 && px[3] < 255).count();
         assert!(partial > 0, "el borde tiene que tener píxeles parciales");
+    }
+
+    #[test]
+    fn custom_color_and_opacity_produce_valid_premultiplied_alpha() {
+        let color = Color::rgba(200, 100, 50, 128);
+        let frame = render_island_with(Size::new(100, 40), color, None).expect("render válido");
+        let center = pixel(&frame, 50, 20);
+        assert_eq!(center[3], 128);
+        assert!((i16::from(center[0]) - 100).abs() <= 1, "{center:?}");
+        assert!((i16::from(center[1]) - 50).abs() <= 1, "{center:?}");
+        assert!((i16::from(center[2]) - 25).abs() <= 1, "{center:?}");
+
+        let (pixels, _) = frame.rgba_premultiplied().as_chunks::<4>();
+        for &[r, g, b, a] in pixels {
+            assert!(
+                r <= a && g <= a && b <= a,
+                "canal mayor que alfa: {r},{g},{b},{a}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_alpha_island_is_completely_transparent() {
+        let frame = render_island_with(Size::new(100, 40), Color::rgba(255, 255, 255, 0), None)
+            .expect("render válido");
+        assert!(frame.rgba_premultiplied().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn custom_corner_radius_changes_corner_coverage() {
+        let sharp =
+            render_island_with(Size::new(100, 40), Color::WHITE, Some(0.0)).expect("rectángulo");
+        assert_eq!(
+            alpha(&sharp, 0, 0),
+            255,
+            "con radio 0 la esquina está llena"
+        );
+
+        let rounded =
+            render_island_with(Size::new(100, 40), Color::WHITE, Some(10.0)).expect("radio 10");
+        assert_eq!(
+            alpha(&rounded, 0, 0),
+            0,
+            "con radio 10 la esquina(0,0) queda afuera"
+        );
+        assert_eq!(
+            alpha(&rounded, 8, 8),
+            255,
+            "con radio 10 el punto (8,8) ya está adentro"
+        );
     }
 
     #[test]

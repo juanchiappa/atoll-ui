@@ -91,18 +91,26 @@ impl Animator {
         true
     }
 
-    /// Cambia los tamaños de reposo y expandido, por ejemplo cuando cambia el DPI.
+    /// Reconfigura los tamaños de reposo y expandido (por ejemplo al recargar
+    /// la configuración o cambiar el DPI).
     ///
-    /// No anima: cancela cualquier animación en curso y deja la isla ya en el
+    /// No anima: cancela cualquier animación en curso y salta de inmediato al
     /// tamaño nuevo que corresponde al estado actual (expandido si el mouse está
     /// encima, contraído si no). El estado de hover se conserva.
-    pub fn resize(&mut self, collapsed: Size, expanded: Size) {
+    pub fn reconfigure(&mut self, collapsed: Size, expanded: Size) {
         self.collapsed = collapsed;
         self.expanded = expanded;
         self.current = if self.hovering { expanded } else { collapsed };
         self.animating = false;
         self.from = as_floats(self.current);
         self.to = self.from;
+    }
+
+    /// Cambia los tamaños de reposo y expandido, por ejemplo cuando cambia el DPI.
+    ///
+    /// Equivale a [`Self::reconfigure`]: no anima y conserva el estado de hover.
+    pub fn resize(&mut self, collapsed: Size, expanded: Size) {
+        self.reconfigure(collapsed, expanded);
     }
 
     /// Avanza la animación hasta `now` y devuelve el tamaño correspondiente.
@@ -274,5 +282,25 @@ mod tests {
         assert!(animator.set_hover(false, now + DURATION));
         let back = animator.tick(now + DURATION * 2);
         assert_eq!(back.size, Size::new(600, 60));
+    }
+
+    #[test]
+    fn reconfigure_snaps_immediately_and_preserves_hover_state() {
+        let now = Instant::now();
+        let mut anim = Animator::new(SMALL, BIG, DURATION, now);
+
+        // En reposo: salta al nuevo tamaño contraído sin animar.
+        anim.reconfigure(Size::new(360, 36), Size::new(520, 72));
+        assert!(!anim.is_hovering());
+        assert_eq!(anim.size(), Size::new(360, 36));
+        assert!(anim.tick(now).finished);
+
+        // Con hover a mitad de camino: salta al nuevo tamaño expandido y apaga la animación.
+        assert!(anim.set_hover(true, now));
+        anim.tick(now + DURATION / 3);
+        anim.reconfigure(Size::new(420, 44), Size::new(600, 80));
+        assert!(anim.is_hovering());
+        assert_eq!(anim.size(), Size::new(600, 80));
+        assert!(anim.tick(now + DURATION).finished);
     }
 }

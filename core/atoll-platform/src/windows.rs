@@ -6,33 +6,43 @@
 //! con `UpdateLayeredWindow` y el sistema la mantiene en pantalla sin que Atoll
 //! haga nada más.
 //!
-//! La animación de hover usa un timer de Win32 que **solo existe mientras la
-//! isla se está moviendo**: arranca cuando el mouse entra o sale y se apaga
-//! apenas la animación termina.
+//! Timers permitidos (solo tres):
+//! 1. **Animación (`ANIMATION_TIMER`):** solo existe mientras la isla se está
+//!    moviendo (≈180 ms) y se apaga apenas termina.
+//! 2. **Reloj (`CLOCK_TIMER`):** un solo disparo por minuto, alineado al próximo
+//!    cambio de minuto (`SetCoalescableTimer` sin coalescencia). Se re-sincroniza
+//!    ante `WM_TIMECHANGE` y al volver de suspensión (`WM_POWERBROADCAST`).
+//! 3. **Debounce de configuración (`RELOAD_TIMER`):** un solo disparo de 50 ms
+//!    cuando el hilo observador avisa (`WM_APP + 1`) que cambió `config.ini`.
 //!
-//! La isla es *Per-Monitor-V2 DPI aware*: las medidas de la configuración son
-//! lógicas (96 DPI) y se multiplican por el factor de escala del monitor, para que
-//! la isla mida lo mismo y se vea nítida con cualquier escalado. Si cambia el DPI
-//! (`WM_DPICHANGED`) o la disposición de pantallas (`WM_DISPLAYCHANGE`), se
-//! recalculan los tamaños y se redibuja una sola vez. Sin timers ni polling.
-//!
-//! Única excepción: el reloj. Hay UN timer de un solo disparo, alineado al
-//! próximo cambio de minuto. Cuando salta se apaga, se redibuja solo si el
-//! minuto cambió y se vuelve a armar con los milisegundos que faltan. No hay
-//! polling. También se re-sincroniza si el usuario cambia la hora del sistema
-//! (`WM_TIMECHANGE`) o si la PC vuelve de suspensión.
+//! Recarga en vivo: un hilo auxiliar con pila reducida (64 KB) queda bloqueado en
+//! `ReadDirectoryChangesW` sobre la carpeta de configuración (cero polling, cero
+//! CPU en reposo) y envía `PostMessageW(hwnd, WM_APP + 1, 0, 0)` cuando se toca
+//! `config.ini` (incluyendo guardado por archivo temporal + renombrado).
 
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::os::windows::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 use std::ptr::{copy_nonoverlapping, null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use atoll_render::{Frame, Size};
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, POINT, SIZE, WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+    FILE_NOTIFY_CHANGE_CREATION, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{
@@ -43,10 +53,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetSystemMetrics, KillTimer, LoadCursorW, PostQuitMessage, RegisterClassExW,
+    GetSystemMetrics, KillTimer, LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW,
     SetCoalescableTimer, SetProcessDPIAware, SetTimer, ShowWindow, TranslateMessage,
     UnregisterClassW, UpdateLayeredWindow, IDC_ARROW, MSG, PBT_APMRESUMEAUTOMATIC,
-    PBT_APMRESUMESUSPEND, SM_CXSCREEN, SW_SHOWNOACTIVATE, TIMERV_NO_COALESCING, ULW_ALPHA,
+    PBT_APMRESUMESUSPEND, SM_CXSCREEN, SW_SHOWNOACTIVATE, TIMERV_NO_COALESCING, ULW_ALPHA, WM_APP,
     WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP,
     WM_TIMECHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
@@ -60,17 +70,26 @@ use crate::{Backend, IslandConfig, Painter, PlatformError};
 /// Nombre de la clase de ventana registrada en Win32.
 const CLASS_NAME: &str = "AtollIsland";
 
+/// Nombre del archivo de configuración observado dentro de la carpeta.
+const CONFIG_FILE_NAME: &str = "config.ini";
+
 /// Mensaje que Windows envía cuando el mouse sale de la ventana (0x02A3).
 ///
 /// Se define acá porque `windows-sys` lo ubica en el módulo `Controls`, y
 /// activar esa feature solo por una constante agrega código que no usamos.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
+/// Mensaje enviado por el hilo observador cuando cambia `config.ini`.
+const WM_CONFIG_CHANGED: u32 = WM_APP + 1;
+
 /// Identificador del timer de la animación.
 const ANIMATION_TIMER: usize = 1;
 
 /// Identificador del timer del reloj (un solo disparo por minuto).
 const CLOCK_TIMER: usize = 2;
+
+/// Identificador del timer de debounce para recargar la configuración (un solo disparo).
+const RELOAD_TIMER: usize = 3;
 
 /// Margen que se suma a la espera del reloj, en milisegundos.
 ///
@@ -81,11 +100,38 @@ const CLOCK_MARGIN_MS: u32 = 20;
 /// Espera de respaldo, en milisegundos, si no se pudiera leer la hora.
 const CLOCK_FALLBACK_MS: u32 = 60_000;
 
+/// Milisegundos de debounce antes de releer `config.ini` tras un aviso del SO.
+const RELOAD_DEBOUNCE_MS: u32 = 50;
+
+/// Tamaño de pila del hilo observador de configuración (64 KB).
+const WATCHER_STACK_BYTES: usize = 64 * 1024;
+
 /// Milisegundos entre cuadros de la animación (≈ 60 cuadros por segundo).
 const FRAME_INTERVAL_MS: u32 = 16;
 
 /// Duración de la animación de expandir y contraer.
 const ANIMATION_DURATION: Duration = Duration::from_millis(180);
+
+/// Bandera para que el hilo observador deje de publicar mensajes al cerrarse la ventana.
+static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Medidas lógicas (`Copy`) de la isla, guardadas en `thread_local!` con `Cell`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LogicalMetrics {
+    size: Size,
+    hover_size: Size,
+    top_margin: u32,
+}
+
+impl From<&IslandConfig> for LogicalMetrics {
+    fn from(config: &IslandConfig) -> Self {
+        Self {
+            size: config.size,
+            hover_size: config.hover_size,
+            top_margin: config.top_margin,
+        }
+    }
+}
 
 thread_local! {
     /// Estado de la animación. El loop de mensajes corre en un solo hilo, así
@@ -93,8 +139,8 @@ thread_local! {
     static ANIMATOR: Cell<Option<Animator>> = const { Cell::new(None) };
     /// Margen superior de la isla, en píxeles físicos (ya escalado).
     static TOP_MARGIN: Cell<i32> = const { Cell::new(0) };
-    /// Configuración lógica de la isla, para recalcular tamaños cuando cambia el DPI.
-    static CONFIG: Cell<Option<IslandConfig>> = const { Cell::new(None) };
+    /// Medidas lógicas actuales de la isla, para recalcular tamaños cuando cambia el DPI o la config.
+    static CONFIG: Cell<Option<LogicalMetrics>> = const { Cell::new(None) };
     /// Factor de escala actual del monitor (1,0 = 100 %).
     static SCALE: Cell<f32> = const { Cell::new(1.0) };
     /// Quien dibuja el contenido de la isla. Se saca del `Cell` mientras dibuja
@@ -113,10 +159,12 @@ impl Backend for WindowsBackend {
         config: &IslandConfig,
         painter: Box<dyn Painter>,
     ) -> Result<(), PlatformError> {
+        WINDOW_CLOSED.store(false, Ordering::SeqCst);
         PAINTER.set(Some(painter));
         // SAFETY: todas las llamadas Win32 ocurren en este hilo, que es el
         // dueño de la ventana y de su cola de mensajes.
         let result = unsafe { run_island(config) };
+        WINDOW_CLOSED.store(true, Ordering::SeqCst);
         PAINTER.set(None);
         ANIMATOR.set(None);
         LAST_DRAWN.set(None);
@@ -128,6 +176,14 @@ impl Backend for WindowsBackend {
 /// Convierte un `&str` a UTF-16 terminado en cero, como pide Win32.
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Convierte una ruta a UTF-16 terminado en cero, como pide Win32.
+fn wide_path(path: &Path) -> Vec<u16> {
+    path.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// Captura el último error del SO junto con el nombre de la llamada que falló.
@@ -157,7 +213,8 @@ fn island_origin(width: u32) -> (i32, i32) {
 ///
 /// Debe llamarse desde un único hilo, que pasa a ser el dueño de la ventana.
 unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
-    CONFIG.set(Some(*config));
+    let metrics = LogicalMetrics::from(config);
+    CONFIG.set(Some(metrics));
 
     // SAFETY: sin precondiciones. Per-Monitor-V2: Windows no escala la ventana y
     // avisa con `WM_DPICHANGED` cuando cambia el DPI.
@@ -221,7 +278,7 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
 
     // SAFETY: `hwnd` es válido y pertenece a este hilo.
     let dpi = unsafe { GetDpiForWindow(hwnd) };
-    apply_scale(config, scale_for_dpi(dpi));
+    apply_scale(metrics, scale_for_dpi(dpi));
 
     // Primer cuadro, al tamaño físico que corresponde a este monitor.
     let first_size = scale_size(config.size, SCALE.get());
@@ -247,6 +304,10 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
     };
 
     LAST_DRAWN.set(Some(first_time));
+
+    if let Some(dir) = config.config_dir.clone() {
+        spawn_config_watcher(hwnd, dir);
+    }
 
     // SAFETY: `hwnd` es válido.
     unsafe {
@@ -276,6 +337,155 @@ unsafe fn run_island(config: &IslandConfig) -> Result<(), PlatformError> {
     // SAFETY: la ventana ya fue destruida; se libera la clase registrada.
     unsafe { UnregisterClassW(class_name.as_ptr(), hinstance) };
     result
+}
+
+/// Inicia el hilo auxiliar que observa cambios sobre `config.ini` en `dir`.
+///
+/// Si el hilo no se puede crear, se informa una sola vez por `stderr` y la isla
+/// sigue funcionando sin recarga en vivo.
+fn spawn_config_watcher(hwnd: HWND, dir: PathBuf) {
+    let hwnd_raw = hwnd as isize;
+    let spawned = thread::Builder::new()
+        .name("atoll-config-watch".to_owned())
+        .stack_size(WATCHER_STACK_BYTES)
+        .spawn(move || {
+            watch_config_dir(hwnd_raw, &dir);
+        });
+    if let Err(err) = spawned {
+        eprintln!("atoll: no se pudo crear el hilo de recarga en vivo: {err}");
+    }
+}
+
+/// Bucle del hilo observador: bloqueado en `ReadDirectoryChangesW` (0% CPU en reposo).
+fn watch_config_dir(hwnd_raw: isize, dir: &Path) {
+    let wide_dir = wide_path(dir);
+    // SAFETY: `wide_dir` es una cadena UTF-16 terminada en cero válida. Se abre el
+    // directorio con `FILE_FLAG_BACKUP_SEMANTICS` y permisos compartidos completos.
+    let handle = unsafe {
+        CreateFileW(
+            wide_dir.as_ptr(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        // SAFETY: `GetLastError` no tiene precondiciones.
+        let code = unsafe { GetLastError() };
+        eprintln!(
+            "atoll: no se pudo observar la carpeta de configuración '{}' (código {code})",
+            dir.display()
+        );
+        return;
+    }
+
+    // Buffer alineado a 4 bytes (como exige `FILE_NOTIFY_INFORMATION`).
+    let mut buffer = [0u32; 1024];
+    let buffer_byte_len = (buffer.len() * size_of::<u32>()) as u32;
+    let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+        | FILE_NOTIFY_CHANGE_LAST_WRITE
+        | FILE_NOTIFY_CHANGE_SIZE
+        | FILE_NOTIFY_CHANGE_CREATION;
+
+    loop {
+        if WINDOW_CLOSED.load(Ordering::Relaxed) {
+            break;
+        }
+        let mut bytes_returned: u32 = 0;
+        // SAFETY: `handle` es un directorio válido y `buffer` está alineado a `u32`
+        // con tamaño `buffer_byte_len`. La llamada es síncrona y bloquea el hilo.
+        let ok = unsafe {
+            ReadDirectoryChangesW(
+                handle,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                buffer_byte_len,
+                0,
+                filter,
+                &mut bytes_returned,
+                null_mut(),
+                None,
+            )
+        };
+        if ok == 0 || WINDOW_CLOSED.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // SAFETY: `buffer` tiene `buffer.len() * 4` bytes inicializados.
+        let raw_bytes = unsafe {
+            std::slice::from_raw_parts(
+                buffer.as_ptr().cast::<u8>(),
+                buffer.len() * size_of::<u32>(),
+            )
+        };
+        let n = (bytes_returned as usize).min(raw_bytes.len());
+        // Si `bytes_returned == 0` con `ok != 0`, el buffer se llenó: avisamos por las dudas.
+        if n == 0 || mentions_config_file(&raw_bytes[..n]) {
+            let hwnd = hwnd_raw as HWND;
+            // SAFETY: `PostMessageW` es seguro entre hilos; si la ventana ya cerró, simplemente devuelve 0.
+            unsafe {
+                PostMessageW(hwnd, WM_CONFIG_CHANGED, 0, 0);
+            }
+        }
+    }
+
+    // SAFETY: `handle` es válido y ya no se usa.
+    unsafe {
+        CloseHandle(handle);
+    }
+}
+
+/// Recorre de forma segura las entradas `FILE_NOTIFY_INFORMATION` devueltas por
+/// `ReadDirectoryChangesW` y devuelve `true` si alguna corresponde a `config.ini`.
+fn mentions_config_file(mut slice: &[u8]) -> bool {
+    const HEADER_SIZE: usize = std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+    while slice.len() >= HEADER_SIZE {
+        let Some(next_bytes) = slice.get(0..4).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
+            break;
+        };
+        let Some(len_bytes) = slice.get(8..12).and_then(|s| <[u8; 4]>::try_from(s).ok()) else {
+            break;
+        };
+        let next_offset = u32::from_ne_bytes(next_bytes) as usize;
+        let name_byte_len = u32::from_ne_bytes(len_bytes) as usize;
+
+        if let Some(name_bytes) = slice.get(HEADER_SIZE..HEADER_SIZE.saturating_add(name_byte_len))
+        {
+            if is_config_ini_utf16(name_bytes) {
+                return true;
+            }
+        }
+
+        if next_offset == 0 || next_offset >= slice.len() {
+            break;
+        }
+        slice = &slice[next_offset..];
+    }
+    false
+}
+
+/// Comprueba si `name_bytes` (UTF-16LE) es exactamente `"config.ini"` sin distinguir mayúsculas.
+fn is_config_ini_utf16(name_bytes: &[u8]) -> bool {
+    let expected = CONFIG_FILE_NAME.as_bytes();
+    if name_bytes.len() != expected.len() * 2 {
+        return false;
+    }
+    let (pairs, remainder) = name_bytes.as_chunks::<2>();
+    if !remainder.is_empty() {
+        return false;
+    }
+    for (&pair, &exp) in pairs.iter().zip(expected.iter()) {
+        let unit = u16::from_ne_bytes(pair);
+        let Ok(byte) = u8::try_from(unit) else {
+            return false;
+        };
+        if !byte.eq_ignore_ascii_case(&exp) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Entrega la imagen a Windows como contenido de la ventana (alfa por píxel).
@@ -501,16 +711,16 @@ unsafe fn on_clock(hwnd: HWND) {
     unsafe { arm_clock(hwnd) };
 }
 
-/// Aplica un factor de escala: guarda el factor, escala el margen y recalcula los
-/// tamaños físicos del animador, conservando si el mouse está encima.
-fn apply_scale(config: &IslandConfig, scale: f32) {
+/// Aplica un factor de escala y las medidas lógicas: guarda el factor, escala el
+/// margen y reconfigura los tamaños físicos del animador conservando el hover.
+fn apply_scale(metrics: LogicalMetrics, scale: f32) {
     SCALE.set(scale);
-    TOP_MARGIN.set(to_i32(scale_px(config.top_margin, scale)));
-    let collapsed = scale_size(config.size, scale);
-    let expanded = scale_size(config.hover_size, scale);
+    TOP_MARGIN.set(to_i32(scale_px(metrics.top_margin, scale)));
+    let collapsed = scale_size(metrics.size, scale);
+    let expanded = scale_size(metrics.hover_size, scale);
     let animator = match ANIMATOR.get() {
         Some(mut animator) => {
-            animator.resize(collapsed, expanded);
+            animator.reconfigure(collapsed, expanded);
             animator
         }
         None => Animator::new(collapsed, expanded, ANIMATION_DURATION, Instant::now()),
@@ -525,11 +735,46 @@ fn apply_scale(config: &IslandConfig, scale: f32) {
 ///
 /// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
 unsafe fn on_dpi_changed(hwnd: HWND, dpi: u32) {
-    let Some(config) = CONFIG.get() else {
+    let Some(metrics) = CONFIG.get() else {
         return;
     };
-    apply_scale(&config, scale_for_dpi(dpi));
+    apply_scale(metrics, scale_for_dpi(dpi));
     // El cambio de tamaño es instantáneo: si había una animación en curso, ya no hace falta.
+    // SAFETY: `hwnd` es válido.
+    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+    if let Some(animator) = ANIMATOR.get() {
+        draw_step(hwnd, animator.size());
+    }
+}
+
+/// Disparo del timer de debounce (50 ms después del último cambio en `config.ini`).
+///
+/// Es de un solo disparo: apaga el timer, le pide al `Painter` que relea la
+/// configuración y, solo si cambió respecto de la actual, reconfigura el
+/// `Animator`, apaga la animación en curso y redibuja una sola vez.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_reload_timer(hwnd: HWND) {
+    // SAFETY: `hwnd` es válido.
+    unsafe { KillTimer(hwnd, RELOAD_TIMER) };
+
+    let reloaded = if let Some(mut painter) = PAINTER.take() {
+        let updated = painter.reload_config();
+        PAINTER.set(Some(painter));
+        updated
+    } else {
+        None
+    };
+
+    let Some(new_config) = reloaded else {
+        return;
+    };
+
+    let metrics = LogicalMetrics::from(&new_config);
+    CONFIG.set(Some(metrics));
+    apply_scale(metrics, SCALE.get());
     // SAFETY: `hwnd` es válido.
     unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
     if let Some(animator) = ANIMATOR.get() {
@@ -563,6 +808,17 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if wparam == CLOCK_TIMER => {
             // SAFETY: ídem.
             unsafe { on_clock(hwnd) };
+            0
+        }
+        WM_TIMER if wparam == RELOAD_TIMER => {
+            // SAFETY: ídem.
+            unsafe { on_reload_timer(hwnd) };
+            0
+        }
+        WM_CONFIG_CHANGED => {
+            // Arma o reinicia el timer de debounce de 50 ms (un solo disparo).
+            // SAFETY: `hwnd` es válido.
+            unsafe { SetTimer(hwnd, RELOAD_TIMER, RELOAD_DEBOUNCE_MS, None) };
             0
         }
         // Cambió el DPI del monitor (el DPI nuevo viene en la palabra baja de `wparam`).
@@ -600,15 +856,62 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
+            WINDOW_CLOSED.store(true, Ordering::SeqCst);
             // SAFETY: sin precondiciones; termina el loop de mensajes.
             unsafe {
                 KillTimer(hwnd, ANIMATION_TIMER);
                 KillTimer(hwnd, CLOCK_TIMER);
+                KillTimer(hwnd, RELOAD_TIMER);
                 PostQuitMessage(0);
             }
             0
         }
         // SAFETY: delegamos el resto al procedimiento por defecto de Windows.
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mentions_config_file;
+
+    /// Arma una entrada `FILE_NOTIFY_INFORMATION` en bytes para probar el filtro.
+    fn encode_entry(next_offset: u32, action: u32, name: &str) -> Vec<u8> {
+        let utf16: Vec<u16> = name.encode_utf16().collect();
+        let name_byte_len = (utf16.len() * 2) as u32;
+        let mut out = Vec::new();
+        out.extend_from_slice(&next_offset.to_ne_bytes());
+        out.extend_from_slice(&action.to_ne_bytes());
+        out.extend_from_slice(&name_byte_len.to_ne_bytes());
+        for unit in utf16 {
+            out.extend_from_slice(&unit.to_ne_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn matches_config_ini_case_insensitively_and_ignores_other_files() {
+        let hit = encode_entry(0, 3, "config.ini");
+        assert!(mentions_config_file(&hit));
+
+        let upper = encode_entry(0, 1, "CONFIG.INI");
+        assert!(mentions_config_file(&upper));
+
+        let other = encode_entry(0, 3, "otro.txt");
+        assert!(!mentions_config_file(&other));
+    }
+
+    #[test]
+    fn finds_config_ini_in_chained_temp_rename_notifications() {
+        let mut first = encode_entry(0, 4, "config.ini.tmp");
+        while (first.len() & 3) != 0 {
+            first.push(0);
+        }
+        let offset = first.len() as u32;
+        first[0..4].copy_from_slice(&offset.to_ne_bytes());
+
+        let second = encode_entry(0, 5, "config.ini");
+        first.extend_from_slice(&second);
+        assert!(mentions_config_file(&first));
     }
 }

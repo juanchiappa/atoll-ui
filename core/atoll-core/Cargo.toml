@@ -13,6 +13,7 @@ name = "atoll"
 path = "src/main.rs"
 
 [dependencies]
+atoll-config.workspace = true
 atoll-platform.workspace = true
 atoll-render.workspace = true
 

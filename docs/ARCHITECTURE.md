@@ -2,7 +2,7 @@
 
 ## Principios
 1. **Recursos:** menos de 20 MB de RAM y 0% de CPU en reposo.
-2. **Loop orientado a eventos:** el hilo principal duerme bloqueado en el event loop del SO. No existe un render loop. Las animaciones usan timers que viven solo mientras dura la animación. Única excepción, deliberada: el timer del reloj (ver "Reloj y excepción a la regla de timers").
+2. **Loop orientado a eventos:** el hilo principal duerme bloqueado en el event loop del SO. No existe un render loop ni polling. Solo existen tres timers permitidos: (a) animación efímera, (b) reloj de un disparo por minuto y (c) debounce de 50 ms al recargar `config.ini`.
 3. **Rust puro:** sin webview ni frameworks de UI. Cada dependencia nueva se justifica por escrito en el PR que la agrega.
 4. **Plugins fuera del Core:** toda integración (Git, IA, N8N, Office, avatar, música, dock) es un proceso separado en `plugins/`. Sin plugins, el Core no carga nada extra. Los plugins no abren ventanas propias: mandan un árbol de widgets y el Core lo dibuja.
 
@@ -10,7 +10,7 @@
 
 | Crate | Ruta | Responsabilidad |
 |---|---|---|
-| `atoll-core` | `core/atoll-core` | Binario `atoll`: contenido de la isla (`IslandPainter`), estado y host de plugins |
+| `atoll-core` | `core/atoll-core` | Binario `atoll`: carga/recarga de `config.ini`, contenido de la isla (`IslandPainter`), estado y host de plugins |
 | `atoll-platform` | `core/atoll-platform` | Código específico de SO (`cfg(target_os)`), traits `Backend` y `Painter`, y módulos portables `animation`, `clock` y `dpi` |
 | `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` y texto con `fontdue` (fuente embebida y caché de glifos) |
 | `atoll-config` | `packages/atoll-config` | Configuración y temas de Atoll: parser y serializador propios sin dependencias externas |
@@ -23,18 +23,30 @@
 - **Backends nativos por SO** detrás de un mismo trait (`Backend`): Win32 (`windows-sys`), AppKit (`objc2`) y Wayland en Linux.
 - **Plugins como procesos separados**, no librerías dinámicas: aíslan crashes y consumo de memoria del Core, y pueden escribirse en cualquier lenguaje. Viven en `plugins/<nombre>/` con un manifiesto en el formato propio de configuración (sin sumar un parser de TOML), hablan con el Core por named pipes (Windows) o sockets Unix (Linux/macOS), y mandan un árbol de widgets para que el Core lo dibuje.
 
-- **Animaciones con timer efímero:** la lógica (`atoll-platform::animation`) es pura y no depende del SO. El backend arranca un timer solo cuando el mouse entra o sale de la isla y lo apaga al terminar la animación (≈180 ms). Fuera de eso no hay ningún timer activo: 0% de CPU en reposo.
+- **Timers permitidos (solo tres):**
+  1. **Animación (`ANIMATION_TIMER`):** la lógica (`atoll-platform::animation`) es pura y no depende del SO. El backend arranca un timer de 16 ms solo cuando el mouse entra o sale de la isla y lo apaga al terminar la animación (≈180 ms).
+  2. **Reloj (`CLOCK_TIMER`):** un timer de un solo disparo por minuto, alineado al cambio de minuto (+ 20 ms de margen) con `SetCoalescableTimer` sin coalescencia (`TIMERV_NO_COALESCING`).
+  3. **Debounce de configuración (`RELOAD_TIMER`):** un timer de un solo disparo de 50 ms que se arma (o reinicia) cuando el hilo observador detecta un cambio sobre `config.ini`.
 
-- **Quién dibuja qué (`Painter`):** el backend de la plataforma no sabe qué se ve en la isla. Recibe un `Box<dyn Painter>` y le pide un `Frame` cada vez que hay que mostrar algo: al abrir, en cada cuadro de la animación, cuando cambia el minuto y cuando cambia el DPI. El Core implementa el `Painter` (`atoll-core::island::IslandPainter`: hora, fecha, layout). Así los plugins podrán pintar contenido en la isla (ítem 15) sin tocar el código de ventana, y la lógica de contenido se prueba en cualquier SO.
+- **Quién dibuja qué (`Painter`):** el backend de la plataforma no sabe qué se ve en la isla. Recibe un `Box<dyn Painter>` y le pide un `Frame` cada vez que hay que mostrar algo: al abrir, en cada cuadro de la animación, cuando cambia el minuto, cuando cambia el DPI y cuando cambia la configuración. El Core implementa el `Painter` (`atoll-core::island::IslandPainter`: tema, colores con alfa premultiplicado, radio de esquina, hora, fecha, layout). Así los plugins podrán pintar contenido en la isla (ítem 15) sin tocar el código de ventana, y la lógica de contenido se prueba en cualquier SO.
 
-- **Escalado DPI por monitor:** las medidas de la configuración (`IslandConfig`) y del `Painter` (tamaño de letra, separaciones) son **lógicas**, a 96 DPI. El backend las multiplica por el factor de escala del monitor (`atoll_platform::dpi`: 120 DPI = 1,25) y le pasa al `Painter` el tamaño físico y la escala. Así la isla mide lo mismo en pantalla y se rasteriza nítida con cualquier escalado, en lugar de que Windows estire un bitmap.
+- **Configuración, temas y recarga en vivo (excepción a la regla de "sin hilos extra"):**
+  - Al arrancar, `atoll-core` busca `%APPDATA%\Atoll\config.ini` con `std::env::var_os("APPDATA")` (sin crates). Si no existe el archivo, crea la carpeta y el archivo con `Config::default().to_text()`. Si `APPDATA` no existe o la creación falla, usa `Config::default()` sin error.
+  - **Hilo observador (`atoll-config-watch`):** única excepción documentada a "sin hilos adicionales". En Windows se crea un hilo con pila reducida (64 KB) que abre `%APPDATA%\Atoll` con `CreateFileW(FILE_FLAG_BACKUP_SEMANTICS)` y duerme bloqueado en `ReadDirectoryChangesW` (0% de CPU en reposo, sin polling ni `sleep`). Observa cambios de nombre, escritura, tamaño y creación, y filtra en código seguro las entradas `FILE_NOTIFY_INFORMATION` que correspondan a `config.ini` (contemplando editores que guardan un archivo temporal y lo renombran).
+  - Cuando detecta un cambio en `config.ini`, envía `PostMessageW(hwnd, WM_APP + 1, 0, 0)` al hilo de la ventana. Si el hilo no se puede crear, se informa una vez por `stderr` y la isla funciona sin recarga en vivo.
+  - **Debounce y aplicación sin parpadeos:** al recibir `WM_APP + 1`, el procedimiento de ventana arma (o reinicia) `RELOAD_TIMER` a 50 ms. Cuando el timer se dispara, se apaga de inmediato (`KillTimer`) y llama a `Painter::reload_config()`:
+    - Si el archivo no se puede leer (bloqueado, a medio escribir o borrado), se conserva la configuración actual.
+    - Si se lee, se parsea con `atoll_config::parse` (enviando advertencias a `stderr`) y se compara con la `Config` actual.
+    - **Solo si la `Config` resultante cambió**, se actualiza el estado, se llama a `Animator::reconfigure` (que salta de inmediato a los tamaños nuevos conservando el estado de hover), se apaga `ANIMATION_TIMER` y se redibuja **una sola vez**.
+
+- **Escalado DPI por monitor:** las medidas de la configuración (`IslandConfig`) y del `Painter` (tamaño de letra, separaciones, radio de esquina) son **lógicas**, a 96 DPI. El backend las multiplica por el factor de escala del monitor (`atoll_platform::dpi`: 120 DPI = 1,25) y le pasa al `Painter` el tamaño físico y la escala. Así la isla mide lo mismo en pantalla y se rasteriza nítida con cualquier escalado, en lugar de que Windows estire un bitmap.
   - En Windows el proceso es Per-Monitor-V2 (`SetProcessDpiAwarenessContext`). Si el SO no lo soporta (anterior a Windows 10 1703) se usa el DPI del sistema (`SetProcessDPIAware`), sin escalado dinámico.
   - El DPI inicial se lee de la propia ventana (`GetDpiForWindow`) antes de mostrarla, creada en el origen de la pantalla principal.
-  - `WM_DPICHANGED` y `WM_DISPLAYCHANGE` recalculan tamaños físicos, margen superior y animador, y redibujan **una sola vez**. El cambio de tamaño es instantáneo (`Animator::resize`: cancela la animación en curso y conserva si el mouse está encima), así que no hace falta ningún timer nuevo y se apaga el timer de animación si estaba activo.
+  - `WM_DPICHANGED` y `WM_DISPLAYCHANGE` recalculan tamaños físicos, margen superior y animador (`Animator::reconfigure`), apagan el timer de animación si estaba activo y redibujan **una sola vez**.
   - La caché de glifos se vacía cuando cambia la escala (`TextRenderer::clear_cache`): los glifos del tamaño anterior no se vuelven a pedir.
   - La isla vive en el monitor principal. Soportar otros monitores es una decisión futura.
 
-- **Reloj y excepción a la regla de timers:** la isla muestra `HH:MM` en reposo y, con hover, la hora y la fecha (`sáb 7 nov`). La hora local sale de `GetLocalTime` (sin crates de fechas) detrás de `atoll_platform::local_time()`. La regla "los timers solo existen durante una animación" tiene **una sola excepción**: UN timer de un solo disparo por minuto.
+- **Reloj y excepción a la regla de timers:** la isla muestra `HH:MM` en reposo y, con hover, la hora y la fecha (`sáb 7 nov`). La hora local sale de `GetLocalTime` (sin crates de fechas) detrás de `atoll_platform::local_time()`.
   - Se arma con los milisegundos que faltan hasta el próximo cambio de minuto (`LocalTime::millis_until_next_minute`) más 20 ms de margen, para no saltar antes de tiempo.
   - Al dispararse se apaga lo primero (`KillTimer`), se redibuja **solo si el minuto cambió** (se compara con la hora del último cuadro dibujado mediante `LocalTime::same_minute`) y se vuelve a armar. No hay polling ni intervalos fijos: en reposo, un despertar por minuto y nada más.
   - Se usa `SetCoalescableTimer` sin coalescencia (`TIMERV_NO_COALESCING`), porque el `SetTimer` común puede agrupar timers y demorar el cambio de minuto. Si Windows lo rechaza, se cae a `SetTimer`.

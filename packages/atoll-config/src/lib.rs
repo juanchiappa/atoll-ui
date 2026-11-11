@@ -10,8 +10,9 @@
 //! - Un texto vacío produce [`Config::default`], que coincide con los valores por
 //!   defecto actuales de la isla.
 //! - Las claves o secciones desconocidas se ignoran y se informan como advertencia.
-//! - Los valores inválidos o fuera de rango caen al valor por defecto (o al del
-//!   tema elegido) y se informan como advertencia.
+//! - Los valores inválidos o fuera de rango (incluyendo `hover_width < width` o
+//!   `hover_height < height`) caen al valor por defecto (o al del tema elegido) y
+//!   se informan como advertencia.
 //! - En `[appearance]`, los valores explícitos válidos del archivo pisan siempre
 //!   a los del preset `theme`, sin importar el orden en que aparezcan las claves.
 
@@ -256,9 +257,9 @@ pub struct IslandSection {
     pub width: u32,
     /// Alto lógico en reposo (`MIN_HEIGHT..=MAX_HEIGHT`).
     pub height: u32,
-    /// Ancho lógico al pasar el mouse (`MIN_WIDTH..=MAX_WIDTH`).
+    /// Ancho lógico al pasar el mouse (`MIN_WIDTH..=MAX_WIDTH`, siempre `>= width`).
     pub hover_width: u32,
-    /// Alto lógico al pasar el mouse (`MIN_HEIGHT..=MAX_HEIGHT`).
+    /// Alto lógico al pasar el mouse (`MIN_HEIGHT..=MAX_HEIGHT`, siempre `>= height`).
     pub hover_height: u32,
     /// Margen superior lógico respecto del borde de la pantalla (`0..=MAX_TOP_MARGIN`).
     pub top_margin: u32,
@@ -333,7 +334,9 @@ impl Config {
         out.push_str("# Tamaño de la isla en reposo (ancho: 120..1600, alto: 24..400).\n");
         out.push_str(&format!("width = {}\n", self.island.width));
         out.push_str(&format!("height = {}\n", self.island.height));
-        out.push_str("# Tamaño de la isla al pasar el mouse (ancho: 120..1600, alto: 24..400).\n");
+        out.push_str(
+            "# Tamaño de la isla al pasar el mouse (ancho: 120..1600 >= width, alto: 24..400 >= height).\n",
+        );
         out.push_str(&format!("hover_width = {}\n", self.island.hover_width));
         out.push_str(&format!("hover_height = {}\n", self.island.hover_height));
         out.push_str("# Separación con el borde superior de la pantalla (0..200).\n");
@@ -440,6 +443,64 @@ enum ActiveSection {
     Unknown,
 }
 
+/// Entrada explícita leída para un tamaño de `[island]`.
+#[derive(Debug, Clone)]
+struct SizeEntry {
+    value: u32,
+    line: usize,
+    raw: String,
+}
+
+/// Valores leídos en `[island]`, para validar además que `hover >= reposo`.
+#[derive(Debug, Default)]
+struct IslandOverrides {
+    width: Option<SizeEntry>,
+    height: Option<SizeEntry>,
+    hover_width: Option<SizeEntry>,
+    hover_height: Option<SizeEntry>,
+    top_margin: Option<u32>,
+}
+
+impl IslandOverrides {
+    /// Resuelve `[island]` verificando que `hover_width >= width` y `hover_height >= height`.
+    fn resolve(self, warnings: &mut Vec<Warning>) -> IslandSection {
+        let mut section = IslandSection::default();
+        if let Some(top_margin) = self.top_margin {
+            section.top_margin = top_margin;
+        }
+
+        let width = self.width.as_ref().map_or(DEFAULT_WIDTH, |e| e.value);
+        let hover_width = self
+            .hover_width
+            .as_ref()
+            .map_or(DEFAULT_HOVER_WIDTH, |e| e.value);
+        if hover_width >= width {
+            section.width = width;
+            section.hover_width = hover_width;
+        } else if let Some(entry) = self.hover_width {
+            push_invalid(warnings, entry.line, "island", "hover_width", &entry.raw);
+        } else if let Some(entry) = self.width {
+            push_invalid(warnings, entry.line, "island", "width", &entry.raw);
+        }
+
+        let height = self.height.as_ref().map_or(DEFAULT_HEIGHT, |e| e.value);
+        let hover_height = self
+            .hover_height
+            .as_ref()
+            .map_or(DEFAULT_HOVER_HEIGHT, |e| e.value);
+        if hover_height >= height {
+            section.height = height;
+            section.hover_height = hover_height;
+        } else if let Some(entry) = self.hover_height {
+            push_invalid(warnings, entry.line, "island", "hover_height", &entry.raw);
+        } else if let Some(entry) = self.height {
+            push_invalid(warnings, entry.line, "island", "height", &entry.raw);
+        }
+
+        section
+    }
+}
+
 /// Valores explícitos leídos en `[appearance]`, para aplicarlos por encima del `Theme`.
 #[derive(Debug, Default)]
 struct AppearanceOverrides {
@@ -478,7 +539,8 @@ impl AppearanceOverrides {
 #[must_use]
 pub fn parse(text: &str) -> (Config, Vec<Warning>) {
     let mut config = Config::default();
-    let mut overrides = AppearanceOverrides::default();
+    let mut island_overrides = IslandOverrides::default();
+    let mut appearance_overrides = AppearanceOverrides::default();
     let mut warnings = Vec::new();
     let mut section = ActiveSection::None;
 
@@ -551,10 +613,16 @@ pub fn parse(text: &str) -> (Config, Vec<Warning>) {
             }
             ActiveSection::Unknown => {}
             ActiveSection::Island => {
-                parse_island_key(&mut config.island, key, value, line_no, &mut warnings);
+                parse_island_key(&mut island_overrides, key, value, line_no, &mut warnings);
             }
             ActiveSection::Appearance => {
-                parse_appearance_key(&mut overrides, key, value, line_no, &mut warnings);
+                parse_appearance_key(
+                    &mut appearance_overrides,
+                    key,
+                    value,
+                    line_no,
+                    &mut warnings,
+                );
             }
             ActiveSection::Behavior => {
                 warnings.push(Warning {
@@ -568,13 +636,15 @@ pub fn parse(text: &str) -> (Config, Vec<Warning>) {
         }
     }
 
-    config.appearance = overrides.resolve();
+    config.island = island_overrides.resolve(&mut warnings);
+    config.appearance = appearance_overrides.resolve();
+    warnings.sort_by_key(|w| w.line);
     (config, warnings)
 }
 
 /// Procesa un par `clave = valor` dentro de `[island]`.
 fn parse_island_key(
-    island: &mut IslandSection,
+    island: &mut IslandOverrides,
     key: &str,
     value: &str,
     line: usize,
@@ -583,41 +653,57 @@ fn parse_island_key(
     match key {
         "width" => {
             if let Some(v) = parse_u32_range(value, MIN_WIDTH, MAX_WIDTH) {
-                island.width = v;
+                island.width = Some(SizeEntry {
+                    value: v,
+                    line,
+                    raw: value.to_owned(),
+                });
             } else {
-                island.width = DEFAULT_WIDTH;
+                island.width = None;
                 push_invalid(warnings, line, "island", key, value);
             }
         }
         "height" => {
             if let Some(v) = parse_u32_range(value, MIN_HEIGHT, MAX_HEIGHT) {
-                island.height = v;
+                island.height = Some(SizeEntry {
+                    value: v,
+                    line,
+                    raw: value.to_owned(),
+                });
             } else {
-                island.height = DEFAULT_HEIGHT;
+                island.height = None;
                 push_invalid(warnings, line, "island", key, value);
             }
         }
         "hover_width" => {
             if let Some(v) = parse_u32_range(value, MIN_WIDTH, MAX_WIDTH) {
-                island.hover_width = v;
+                island.hover_width = Some(SizeEntry {
+                    value: v,
+                    line,
+                    raw: value.to_owned(),
+                });
             } else {
-                island.hover_width = DEFAULT_HOVER_WIDTH;
+                island.hover_width = None;
                 push_invalid(warnings, line, "island", key, value);
             }
         }
         "hover_height" => {
             if let Some(v) = parse_u32_range(value, MIN_HEIGHT, MAX_HEIGHT) {
-                island.hover_height = v;
+                island.hover_height = Some(SizeEntry {
+                    value: v,
+                    line,
+                    raw: value.to_owned(),
+                });
             } else {
-                island.hover_height = DEFAULT_HOVER_HEIGHT;
+                island.hover_height = None;
                 push_invalid(warnings, line, "island", key, value);
             }
         }
         "top_margin" => {
             if let Some(v) = parse_u32_range(value, 0, MAX_TOP_MARGIN) {
-                island.top_margin = v;
+                island.top_margin = Some(v);
             } else {
-                island.top_margin = DEFAULT_TOP_MARGIN;
+                island.top_margin = None;
                 push_invalid(warnings, line, "island", key, value);
             }
         }
@@ -818,6 +904,61 @@ corner_radius = 18
     }
 
     #[test]
+    fn hover_size_smaller_than_rest_size_falls_back_to_defaults_with_warning() {
+        let input = "\
+[island]
+width = 500
+hover_width = 440
+height = 80
+hover_height = 60
+";
+        let (cfg, warnings) = parse(input);
+        assert_eq!(cfg.island.width, DEFAULT_WIDTH);
+        assert_eq!(cfg.island.hover_width, DEFAULT_HOVER_WIDTH);
+        assert_eq!(cfg.island.height, DEFAULT_HEIGHT);
+        assert_eq!(cfg.island.hover_height, DEFAULT_HOVER_HEIGHT);
+        assert_eq!(
+            warnings,
+            vec![
+                Warning {
+                    line: 3,
+                    kind: WarningKind::InvalidValue {
+                        section: "island".to_owned(),
+                        key: "hover_width".to_owned(),
+                        value: "440".to_owned(),
+                    },
+                },
+                Warning {
+                    line: 5,
+                    kind: WarningKind::InvalidValue {
+                        section: "island".to_owned(),
+                        key: "hover_height".to_owned(),
+                        value: "60".to_owned(),
+                    },
+                },
+            ]
+        );
+
+        // Si solo se indica `width = 600` (mayor que el `hover_width` por defecto 480),
+        // también se restaura el par por defecto y se informa en la línea de `width`.
+        let only_width = "[island]\nwidth = 600\n";
+        let (cfg2, warnings2) = parse(only_width);
+        assert_eq!(cfg2.island.width, DEFAULT_WIDTH);
+        assert_eq!(cfg2.island.hover_width, DEFAULT_HOVER_WIDTH);
+        assert_eq!(
+            warnings2,
+            vec![Warning {
+                line: 2,
+                kind: WarningKind::InvalidValue {
+                    section: "island".to_owned(),
+                    key: "width".to_owned(),
+                    value: "600".to_owned(),
+                },
+            }]
+        );
+    }
+
+    #[test]
     fn colors_support_both_rrggbb_and_rrggbbaa_case_insensitively() {
         assert_eq!(Color::parse("#000000"), Some(Color::rgb(0, 0, 0)));
         assert_eq!(Color::parse("#ff8040"), Some(Color::rgb(255, 128, 64)));
@@ -852,12 +993,10 @@ corner_radius = 18
 
     #[test]
     fn preset_sets_appearance_and_explicit_fields_override_it_in_any_order() {
-        // Solo el tema: aplica todos los valores de `white`.
         let (white_only, warnings) = parse("[appearance]\ntheme = white\n");
         assert!(warnings.is_empty());
         assert_eq!(white_only.appearance, Theme::White.appearance());
 
-        // Override después de `theme`.
         let after = "
 [appearance]
 theme = white
@@ -877,7 +1016,6 @@ opacity = 80
         );
         assert_eq!(cfg_after.appearance.opacity, 80);
 
-        // Override ANTES de `theme`: el valor explícito sigue pisando al preset.
         let before = "
 [appearance]
 background = #223344

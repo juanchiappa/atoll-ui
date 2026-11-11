@@ -9,8 +9,8 @@ Las ideas todavía sin decidir viven en `docs/IDEAS.md`, no acá.
 ## Reglas innegociables
 
 1. **Recursos:** < 20 MB de RAM y 0 % de CPU en reposo. Loop 100 % orientado a eventos, sin render loop.
-   Los timers solo existen mientras dura una animación. Única excepción (ítem 9): un timer de un solo
-   disparo por minuto para el reloj.
+   Solo tres timers permitidos: (a) animación efímera, (b) reloj de un disparo por minuto (ítem 9) y
+   (c) debounce de 50 ms al recargar `config.ini` (ítem 11).
 2. **Core en Rust puro.** Sin webview ni frameworks de UI. Cada crate nuevo se justifica en
    `docs/DEPENDENCIES.md`, en el mismo PR que lo agrega.
 3. **Monorepo:** `core/`, `packages/`, `plugins/`, `docs/`, `.github/`.
@@ -36,7 +36,7 @@ Referencia: Hecho / En revisión / Pendiente.
 | 8 | Primitiva de texto en `atoll-render` (#5) | Hecho |
 | 9 | Reloj en la isla (#6) | Hecho |
 | 10 | Escalado DPI por monitor (#7) | Hecho |
-| 11 | Archivo de configuración y temas (colores, tamaños, radio, opacidad, margen) | Pendiente |
+| 11 | Archivo de configuración y temas (colores, tamaños, radio, opacidad, margen) | Hecho |
 | 12 | Comportamiento configurable (retardo de aparición, estilo isla o muesca, autoocultar) | Pendiente |
 | 13 | Release v0.1: workflow de release con ejecutable de Windows y README con la medición | Pendiente |
 | 14 | `atoll-ui`, mini toolkit de widgets | Pendiente |
@@ -94,13 +94,16 @@ Referencia: Hecho / En revisión / Pendiente.
 
 ## Ítems pendientes
 
-### 11. Archivo de configuración y temas
+### 11. Archivo de configuración y temas (hecho)
 
-- Configuración con formato propio mínimo (`clave = valor` por secciones, parser propio con tests), sin `serde`
-  ni `toml`. Ubicación en Windows: `%APPDATA%\Atoll\`.
-- Valores inválidos no rompen nada: se usa el valor por defecto y se informa.
-- Permite configurar colores, tamaños, radio de borde, opacidad y margen superior.
-- Recarga al detectar cambios en el archivo con notificación del SO (`ReadDirectoryChangesW` en Windows), sin polling.
+- Configuración con formato propio mínimo (`clave = valor` por secciones en `packages/atoll-config`, parser y
+  serializador propios con tests), sin `serde` ni `toml`. Ubicación en Windows: `%APPDATA%\Atoll\config.ini`.
+- Valores inválidos (incluyendo `hover_width < width` y `hover_height < height`) no rompen nada: se usa el valor
+  por defecto y se informa por `stderr`.
+- Permite configurar tema (`black`, `graphite`, `white`), colores (`background`, `text_color`), tamaños,
+  radio de borde (`auto` o píxeles), opacidad (`0..=100`, con alfa premultiplicado) y margen superior.
+- Recarga en vivo al detectar cambios sobre `%APPDATA%\Atoll\config.ini` con `ReadDirectoryChangesW` (hilo
+  auxiliar bloqueado en el SO, 0% CPU en reposo) y debounce de un disparo de 50 ms.
 
 ### 12. Comportamiento configurable
 

@@ -5,6 +5,7 @@
 //! conoce el trait [`Backend`].
 
 use std::fmt;
+use std::path::PathBuf;
 
 use atoll_render::{Frame, Size};
 
@@ -50,7 +51,7 @@ impl Os {
 ///
 /// Todas las medidas son **lógicas**: píxeles a 96 DPI (100 % de escala). El
 /// backend las multiplica por el factor de escala del monitor (ver [`dpi`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IslandConfig {
     /// Tamaño lógico de la isla en reposo.
     pub size: Size,
@@ -58,17 +59,28 @@ pub struct IslandConfig {
     pub hover_size: Size,
     /// Separación lógica entre el borde superior de la pantalla y la isla.
     pub top_margin: u32,
+    /// Carpeta donde vive `config.ini`, para observar cambios y recargar en vivo.
+    pub config_dir: Option<PathBuf>,
 }
 
 impl IslandConfig {
-    /// Crea una configuración a partir de los dos tamaños y el margen superior.
+    /// Crea una configuración a partir de los dos tamaños y el margen superior,
+    /// sin carpeta de recarga en vivo.
     #[must_use]
     pub const fn new(size: Size, hover_size: Size, top_margin: u32) -> Self {
         Self {
             size,
             hover_size,
             top_margin,
+            config_dir: None,
         }
+    }
+
+    /// Asocia la carpeta de configuración para habilitar la recarga en vivo.
+    #[must_use]
+    pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
+        self.config_dir = Some(dir);
+        self
     }
 }
 
@@ -100,21 +112,31 @@ impl fmt::Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
-/// Dibuja el contenido de la isla.
+/// Dibuja el contenido de la isla y gestiona su recarga de configuración.
 ///
 /// El backend lo llama cada vez que hay que mostrar algo nuevo: al abrir, en cada
-/// cuadro de la animación de hover, cuando cambia el minuto y cuando cambia el
-/// DPI del monitor. Quién implementa este trait decide qué se ve; el backend
-/// solo lo entrega al sistema operativo.
+/// cuadro de la animación de hover, cuando cambia el minuto, cuando cambia el
+/// DPI del monitor y cuando se recarga el archivo de configuración. Quién implementa
+/// este trait decide qué se ve; el backend solo lo entrega al sistema operativo.
 pub trait Painter {
     /// Dibuja la isla con la hora `time`.
     ///
     /// `size` es el tamaño **físico** del cuadro, en píxeles. `scale` es el factor
-    /// de escala del monitor (1,0 = 100 %, 1,5 = 150 %): sirve para escalar texto
-    /// y separaciones, que se definen en píxeles lógicos.
+    /// de escala del monitor (1,0 = 100 %, 1,5 = 150 %): sirve para escalar texto,
+    /// radio de borde y separaciones, que se definen en píxeles lógicos.
     ///
     /// Devuelve `None` si no se pudo dibujar.
     fn paint(&mut self, size: Size, scale: f32, time: LocalTime) -> Option<Frame>;
+
+    /// Se invoca cuando el archivo de configuración cambió en disco (tras el debounce).
+    ///
+    /// Si el archivo se pudo leer y la configuración resultante **cambió** respecto
+    /// de la actual, aplica los nuevos valores y devuelve `Some(IslandConfig)` con
+    /// las nuevas medidas lógicas para que el backend reconfigure la ventana y
+    /// redibuje una sola vez. Si no se pudo leer o nada cambió, devuelve `None`.
+    fn reload_config(&mut self) -> Option<IslandConfig> {
+        None
+    }
 }
 
 /// Backend nativo de un sistema operativo.
@@ -127,7 +149,8 @@ pub trait Backend {
     /// Al pasar el mouse la isla se expande a `config.hover_size` con una
     /// animación, y vuelve a su tamaño al sacarlo. El backend mantiene un único
     /// timer de un solo disparo, alineado al cambio de minuto, para redibujar la hora.
-    /// Si cambia el DPI del monitor, recalcula los tamaños físicos y vuelve a dibujar.
+    /// Si cambia el DPI del monitor o el archivo de configuración, recalcula los
+    /// tamaños físicos y vuelve a dibujar una sola vez.
     ///
     /// # Errors
     ///
@@ -164,6 +187,8 @@ pub fn native_backend() -> Result<Box<dyn Backend>, PlatformError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{IslandConfig, Os, PlatformError};
     use atoll_render::Size;
 
@@ -174,10 +199,12 @@ mod tests {
 
     #[test]
     fn config_keeps_values() {
-        let config = IslandConfig::new(Size::new(400, 40), Size::new(480, 64), 8);
+        let config = IslandConfig::new(Size::new(400, 40), Size::new(480, 64), 8)
+            .with_config_dir(PathBuf::from("Atoll"));
         assert_eq!(config.size, Size::new(400, 40));
         assert_eq!(config.hover_size, Size::new(480, 64));
         assert_eq!(config.top_margin, 8);
+        assert_eq!(config.config_dir, Some(PathBuf::from("Atoll")));
     }
 
     #[test]
