@@ -13,6 +13,7 @@
 | `atoll-core` | `core/atoll-core` | Binario `atoll`: contenido de la isla (`IslandPainter`), estado y host de plugins |
 | `atoll-platform` | `core/atoll-platform` | Código específico de SO (`cfg(target_os)`), traits `Backend` y `Painter`, y módulos portables `animation`, `clock` y `dpi` |
 | `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` y texto con `fontdue` (fuente embebida y caché de glifos) |
+| `atoll-config` | `packages/atoll-config` | Configuración y temas de Atoll: parser y serializador propios sin dependencias externas |
 | `atoll-ipc` | `packages/atoll-ipc` | Protocolo IPC local Core ↔ plugins |
 | `atoll-plugin-sdk` | `packages/atoll-plugin-sdk` | SDK para autores de plugins |
 

@@ -4,6 +4,7 @@ members = [
     "core/atoll-core",
     "core/atoll-platform",
     "core/atoll-render",
+    "packages/atoll-config",
     "packages/atoll-ipc",
     "packages/atoll-plugin-sdk",
 ]
@@ -19,6 +20,7 @@ authors = ["Juan Ignacio Chiappa"]
 [workspace.dependencies]
 atoll-platform = { path = "core/atoll-platform" }
 atoll-render = { path = "core/atoll-render" }
+atoll-config = { path = "packages/atoll-config" }
 atoll-ipc = { path = "packages/atoll-ipc" }
 
 [workspace.lints.rust]
