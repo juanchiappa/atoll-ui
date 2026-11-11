@@ -1,6 +1,6 @@
 [package]
 name = "atoll-render"
-description = "Render por software de Atoll, orientado a eventos y por regiones dañadas."
+description = "Render por software de Atoll, orientado a eventos."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

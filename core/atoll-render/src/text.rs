@@ -1,7 +1,7 @@
 //! Primitiva de texto: rasteriza glifos de una fuente embebida y los compone sobre un [`Frame`].
 //!
 //! Diseño:
-//! - La fuente (Inter Medium recortada, ver `docs/THIRD_PARTY_NOTICES.md`) viaja dentro del
+//! - La fuente (Inter Medium recortada, ver `THIRD_PARTY_NOTICES.md`) viaja dentro del
 //!   binario con `include_bytes!`. No se leen fuentes del sistema.
 //! - Cada glifo se rasteriza una sola vez por tamaño y queda en una caché acotada: redibujar
 //!   el mismo texto no vuelve a rasterizar nada.
