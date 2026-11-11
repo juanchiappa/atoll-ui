@@ -26,21 +26,21 @@ Dueño del proyecto: Juan (`juanchiappa`), Buenos Aires. Idioma de trabajo: espa
 | 5 | Ventana de isla en Windows con loop de eventos | Hecho y verificado |
 | 6 | Render con tiny-skia y ventana con alfa por píxel | Hecho y verificado |
 | 7 | Animación de hover con timer efímero | Hecho y verificado |
-| 8 | Texto en la isla | Reportado como terminado por el dueño |
-| 9 | Reloj en la isla | Reportado como terminado por el dueño |
-| 10 | Escalado DPI por monitor | Reportado como terminado por el dueño |
+| 8 | Texto en la isla (`fontdue` + Inter Medium embebida) | Hecho y verificado |
+| 9 | Reloj en la isla (`GetLocalTime` + timer de un disparo por minuto) | Hecho y verificado |
+| 10 | Escalado DPI por monitor (Per-Monitor-V2) | Hecho y verificado |
 
-Los ítems 8 a 10 se hicieron en otro chat. **Primera tarea del agente nuevo: auditar el repo** y dejar `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` y `docs/DEPENDENCIES.md` coherentes con el código real (qué dependencia de texto se eligió, cómo quedó el timer del reloj, cómo se maneja el DPI).
+Los ítems 8 a 10 se auditaron contra el código de `main` y están reflejados en `docs/ROADMAP.md`, `docs/ARCHITECTURE.md` y `docs/DEPENDENCIES.md`.
 
 ### Crates
-- `atoll-core`: binario `atoll`. Arma la configuración, renderiza la isla y la entrega al backend.
-- `atoll-platform`: trait `Backend`, `native_backend()`, `IslandConfig`, `PlatformError`, módulo portable `animation` (`Animator`, `ease_out_cubic`) y módulo `windows` (solo `cfg(windows)`).
-- `atoll-render`: `Size`, `Frame` (RGBA premultiplicado, con `bgra_premultiplied()`), `render_island()`, errores de render, texto.
+- `atoll-core`: binario `atoll` y módulo `island` (`IslandPainter`, `format_time`, `format_date`). Arma la configuración lógica, dibuja la isla con hora/fecha y la entrega al backend.
+- `atoll-platform`: traits `Backend` y `Painter`, `native_backend()`, `IslandConfig`, `PlatformError`, módulos portables `animation` (`Animator`, `Step`, `ease_out_cubic`), `clock` (`LocalTime`, `local_time()`) y `dpi` (`BASE_DPI`, `scale_for_dpi`, `scale_px`, `scale_size`), y módulo `windows` (solo `cfg(windows)`).
+- `atoll-render`: `Size`, `Frame` (RGBA premultiplicado, con `bgra_premultiplied()`), `render_island()`, `RenderError`, y texto con `fontdue` (`TextRenderer`, `Color`, `LineMetrics` y fuente Inter Medium embebida).
 - `atoll-ipc`: hoy solo `PROTOCOL_VERSION`. Se desarrolla en el ítem 15.
-- `atoll-plugin-sdk`: hoy solo reexporta la versión del protocolo.
+- `atoll-plugin-sdk`: hoy solo reexporta la versión del protocolo (`protocol_version()`).
 
 ### Valores actuales de la isla
-Reposo 400x40, hover 480x64, margen superior 8 px, animación de 180 ms con `ease-out cubic`, centrada horizontalmente, color negro.
+Reposo 400x40 lógicos, hover 480x64 lógicos, margen superior 8 px lógicos, animación de 180 ms con `ease-out cubic`, centrada horizontalmente, color negro, texto blanco con hora `HH:MM` en reposo y fecha `sáb 7 nov` al expandir.
 
 ## 4. Decisiones de arquitectura y su porqué
 
@@ -48,7 +48,7 @@ Reposo 400x40, hover 480x64, margen superior 8 px, animación de 180 ms con `eas
 2. **Render por software con `tiny-skia`, sin GPU.** La isla ocupa pocos píxeles; `wgpu` suma drivers y memoria. Se configuró sin SIMD ni PNG para achicar el binario.
 3. **Ventana `WS_EX_LAYERED` + `UpdateLayeredWindow`.** Se entrega la imagen una vez y Windows la mantiene en pantalla; Atoll no hace nada hasta el próximo evento. Reemplazó a `SetWindowRgn`, que dejaba bordes serrados. Los clics sobre píxeles transparentes pasan a la ventana de abajo.
 4. **`GetMessageW` bloqueante.** El hilo duerme hasta que llega un mensaje: 0% de CPU en reposo.
-5. **Timers solo efímeros.** El timer de animación existe únicamente mientras la isla se mueve. Excepción documentada: un timer de un disparo por minuto para el reloj, alineado al cambio de minuto.
+5. **Timers solo efímeros.** El timer de animación existe únicamente mientras la isla se mueve. Excepción documentada: un timer de un disparo por minuto para el reloj (`SetCoalescableTimer` sin coalescencia, con respaldo a `SetTimer`), alineado al cambio de minuto (+ 20 ms de margen) y re-sincronizado ante `WM_TIMECHANGE` y `WM_POWERBROADCAST`.
 6. **Estado de la ventana en `thread_local!` con `Cell`**, no con `RefCell`: Windows puede reentrar al procedimiento de ventana de forma síncrona (por ejemplo desde `UpdateLayeredWindow`) y un `RefCell` entraría en pánico.
 7. **`windows-sys` y no el crate `windows`.** Bindings crudos, sin capas. En Linux y macOS no suma nada (`[target.'cfg(windows)'.dependencies]`).
 8. **`WM_MOUSELEAVE` definido a mano (`0x02A3`).** `windows-sys` lo ubica en el módulo `Controls`; activar esa feature por una constante no vale.
@@ -58,9 +58,9 @@ Reposo 400x40, hover 480x64, margen superior 8 px, animación de 180 ms con `eas
 12. **Menú de configuración como ejecutable aparte (`atoll-settings`).** Escribe el archivo de configuración y se cierra. Cuando está cerrado no ocupa RAM. El Core recarga al detectar el cambio del archivo con la notificación del SO (`ReadDirectoryChangesW` en Windows), sin polling.
 13. **Configuración con formato propio mínimo** (clave = valor por secciones, parser propio con tests), sin `serde` ni `toml`. Ubicación en Windows: `%APPDATA%\Atoll\`. Valores inválidos no rompen nada: se usa el valor por defecto y se informa.
 14. **Idiomas: es/en como tablas embebidas**, sin crates de i18n. Escrituras complejas (hindi, árabe, CJK) quedan para más adelante: requieren motor de shaping y fuentes grandes.
-15. **Un solo monorepo.** Los plugins oficiales viven en `plugins/<nombre>/` como proyectos Cargo independientes (su propio `Cargo.toml` y `Cargo.lock`), excluidos del workspace raíz con `exclude = ["plugins"]`, para que sus dependencias pesadas no ensucien el `Cargo.lock` del Core. Cuando llegue el primer plugin oficial hay que cambiar el `.gitignore`: quitar `/plugins/*` y `!plugins/.gitkeep`, e ignorar `/plugins/**/target/`. Archivos pesados (videos, renders grandes) no van al repo.
+15. **Un solo monorepo.** Los plugins oficiales vivirán en `plugins/<nombre>/` como proyectos Cargo independientes (su propio `Cargo.toml` y `Cargo.lock`). Cuando llegue el primer plugin oficial hay que agregar `exclude = ["plugins"]` al `Cargo.toml` raíz para que sus dependencias pesadas no ensucien el `Cargo.lock` del Core, y cambiar el `.gitignore`: quitar `/plugins/*` y `!plugins/.gitkeep`, e ignorar `/plugins/**/target/`. Archivos pesados (videos, renders grandes) no van al repo.
 16. **Dock propio: plugin opcional, solo Windows, sin reemplazar la bandeja del sistema.** Reemplazar el área de notificaciones es lo más frágil de toda la idea.
-17. **Pendiente de decidir en el ítem 15:** el manifiesto de los plugins se planeó como `plugin.toml`, pero la decisión 13 evita sumar un parser de TOML. Usar el mismo formato propio de la configuración.
+17. **Pendiente de decidir en el ítem 15:** el manifiesto de los plugins se planeó originalmente como `plugin.toml`, pero la decisión 13 evita sumar un parser de TOML. Usar el mismo formato propio de la configuración.
 
 ## 5. Licencia y marca
 
