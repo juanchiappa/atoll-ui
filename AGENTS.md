@@ -15,13 +15,13 @@ Si una tarea contradice alguna, PARÁ y avisá antes de escribir código.
 
 ## Estructura
 ```
-core/atoll-core        binario "atoll": loop de eventos, estado, host de plugins
-core/atoll-platform    TODO el código específico de SO (cfg(target_os)); módulo portable `animation`
-core/atoll-render      render por software con tiny-skia; texto
+core/atoll-core        binario "atoll": loop de eventos, contenido (island), estado, host de plugins
+core/atoll-platform    TODO el código específico de SO (cfg(target_os)); módulos portables animation, clock y dpi
+core/atoll-render      render por software con tiny-skia; texto con fontdue y fuente embebida
 packages/atoll-ipc     protocolo IPC Core <-> plugins
 packages/atoll-plugin-sdk
 plugins/               plugins oficiales (cada uno, proyecto Cargo independiente)
-docs/                  ARCHITECTURE.md, DEPENDENCIES.md, ROADMAP.md, HANDOFF.md
+docs/                  ARCHITECTURE.md, DEPENDENCIES.md, ROADMAP.md, HANDOFF.md, FONTS.md
 ```
 Planeado: `packages/atoll-ui` (mini toolkit de widgets) y `core/atoll-settings` (menú de configuración, ejecutable aparte).
 
@@ -31,8 +31,8 @@ Verificá el estado real leyendo `Cargo.toml` de cada crate, `docs/ROADMAP.md` y
 
 ## Dependencias aprobadas
 - `windows-sys` 0.59 (solo `cfg(windows)`, solo `atoll-platform`), con features mínimas.
-- `tiny-skia` 0.11 con `default-features = false, features = ["std"]`.
-- Las de texto/fuente del ítem 8: ver `docs/DEPENDENCIES.md`.
+- `tiny-skia` 0.11 con `default-features = false, features = ["std"]` (solo `atoll-render`).
+- `fontdue` 0.9 con `default-features = false` (solo `atoll-render`): ver `docs/DEPENDENCIES.md`.
 Cualquier otra está prohibida hasta que se apruebe.
 
 ## Convenciones de código
