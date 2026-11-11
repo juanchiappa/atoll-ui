@@ -40,6 +40,9 @@ pub struct Color {
 }
 
 impl Color {
+    /// Negro opaco.
+    pub const BLACK: Self = Self::rgba(0, 0, 0, 255);
+
     /// Blanco opaco.
     pub const WHITE: Self = Self::rgba(255, 255, 255, 255);
 

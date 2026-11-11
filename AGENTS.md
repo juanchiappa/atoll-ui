@@ -27,7 +27,7 @@ docs/                  ARCHITECTURE.md, CONFIG.md, DEPENDENCIES.md, ROADMAP.md, 
 Planeado: `packages/atoll-ui` (mini toolkit de widgets) y `core/atoll-settings` (menú de configuración, ejecutable aparte).
 
 ## Estado
-Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado), animación de hover 400x40 -> 480x64 en 180 ms con timer efímero, texto, reloj y escalado DPI por monitor. Linux y macOS devuelven `Unsupported`.
+Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio configurables), animación de hover con timer efímero, texto, reloj, escalado DPI por monitor, y archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo. Linux y macOS devuelven `Unsupported`.
 Verificá el estado real leyendo `Cargo.toml` de cada crate, `docs/ROADMAP.md` y `docs/DEPENDENCIES.md`.
 
 ## Dependencias aprobadas
@@ -43,7 +43,7 @@ Cualquier otra está prohibida hasta que se apruebe.
 - Código de SO solo en `atoll-platform`. La lógica que no depende del SO (estado, animaciones) va en módulos portables, con tests que corran en Linux.
 - Errores con `Result` y tipos propios. `Box<dyn Error>` solo en `main`.
 - Comentarios y docs en español; identificadores en inglés.
-- Timers: solo dos permitidos. (a) El de animación, que existe únicamente mientras dura la animación. (b) Un timer de un solo disparo por minuto para el reloj, alineado al cambio de minuto. Nada de polling ni `sleep` en hilos. Cualquier otro necesita aprobación y se documenta en `docs/ARCHITECTURE.md`.
+- Timers: solo tres permitidos. (a) El de animación, que existe únicamente mientras dura la animación. (b) Un timer de un solo disparo por minuto para el reloj, alineado al cambio de minuto. (c) Un timer de un solo disparo de 50 ms para el debounce al recargar `config.ini`. Nada de polling ni `sleep` en hilos. Única excepción a "sin hilos extra": el hilo observador de configuración, que vive bloqueado en `ReadDirectoryChangesW` (0% CPU en reposo). Cualquier otro necesita aprobación y se documenta en `docs/ARCHITECTURE.md`.
 - Se redibuja solo cuando algo cambió.
 
 ## Flujo de trabajo

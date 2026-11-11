@@ -22,6 +22,7 @@ version = "0.1.0"
 name = "atoll-core"
 version = "0.1.0"
 dependencies = [
+ "atoll-config",
  "atoll-platform",
  "atoll-render",
 ]
