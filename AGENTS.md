@@ -18,10 +18,11 @@ Si una tarea contradice alguna, PARÁ y avisá antes de escribir código.
 core/atoll-core        binario "atoll": loop de eventos, contenido (island), estado, host de plugins
 core/atoll-platform    TODO el código específico de SO (cfg(target_os)); módulos portables animation, clock y dpi
 core/atoll-render      render por software con tiny-skia; texto con fontdue y fuente embebida
+packages/atoll-config  configuración y temas: parser y serializador propios sin dependencias
 packages/atoll-ipc     protocolo IPC Core <-> plugins
 packages/atoll-plugin-sdk
 plugins/               plugins oficiales (cada uno, proyecto Cargo independiente)
-docs/                  ARCHITECTURE.md, DEPENDENCIES.md, ROADMAP.md, HANDOFF.md, FONTS.md
+docs/                  ARCHITECTURE.md, CONFIG.md, DEPENDENCIES.md, ROADMAP.md, HANDOFF.md, FONTS.md
 ```
 Planeado: `packages/atoll-ui` (mini toolkit de widgets) y `core/atoll-settings` (menú de configuración, ejecutable aparte).
 

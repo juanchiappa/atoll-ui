@@ -1,0 +1,12 @@
+[package]
+name = "atoll-config"
+description = "Configuración y temas de Atoll: parser y serializador propios sin dependencias externas."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
