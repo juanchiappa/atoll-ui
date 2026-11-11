@@ -3,6 +3,7 @@ name = "atoll-ipc"
 description = "Protocolo de IPC local entre el Core de Atoll y sus plugins."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
