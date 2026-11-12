@@ -10,9 +10,13 @@
 //! - Un texto vacío produce [`Config::default`], que coincide con los valores por
 //!   defecto actuales de la isla.
 //! - Las claves o secciones desconocidas se ignoran y se informan como advertencia.
-//! - Los valores inválidos o fuera de rango (incluyendo `hover_width < width` o
-//!   `hover_height < height`) caen al valor por defecto (o al del tema elegido) y
-//!   se informan como advertencia.
+//! - Los valores inválidos o fuera de rango caen al valor por defecto (o al del
+//!   tema elegido) y se informan como advertencia.
+//! - Si en `[island]` solo se define `width` (o `height`) con un valor válido mayor
+//!   que `hover_width` (o `hover_height`) por defecto, se conserva ese valor y se
+//!   sube automáticamente `hover_width` (o `hover_height`) para igualarlo, emitiendo
+//!   una advertencia. Solo se vuelve a los valores por defecto cuando ambos están
+//!   definidos (o solo se definió `hover_*`) y `hover < reposo`.
 //! - En `[appearance]`, los valores explícitos válidos del archivo pisan siempre
 //!   a los del preset `theme`, sin importar el orden en que aparezcan las claves.
 
@@ -39,6 +43,12 @@ pub const MAX_OPACITY: u8 = 100;
 /// Radio de esquina lógico máximo permitido cuando se fija en píxeles.
 pub const MAX_CORNER_RADIUS: u32 = 200;
 
+/// Retardo máximo permitido antes de expandir la isla al pasar el mouse (en ms).
+pub const MAX_HOVER_DELAY_MS: u32 = 2000;
+
+/// Duración máxima permitida para la animación de expandir y contraer (en ms).
+pub const MAX_ANIMATION_MS: u32 = 1000;
+
 /// Ancho lógico por defecto de la isla en reposo.
 pub const DEFAULT_WIDTH: u32 = 400;
 
@@ -53,6 +63,12 @@ pub const DEFAULT_HOVER_HEIGHT: u32 = 64;
 
 /// Margen superior lógico por defecto.
 pub const DEFAULT_TOP_MARGIN: u32 = 8;
+
+/// Retardo de hover por defecto, en milisegundos (sin retardo).
+pub const DEFAULT_HOVER_DELAY_MS: u32 = 0;
+
+/// Duración por defecto de la animación de expandir y contraer, en milisegundos.
+pub const DEFAULT_ANIMATION_MS: u32 = 180;
 
 /// Color RGBA de 8 bits por canal en la configuración.
 ///
@@ -237,6 +253,47 @@ impl fmt::Display for CornerRadius {
     }
 }
 
+/// Estilo de forma y anclaje de la barra en `[behavior]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IslandStyle {
+    /// Isla flotante separada del borde superior por `top_margin`, con las 4 esquinas redondeadas.
+    #[default]
+    Island,
+    /// Muesca pegada al borde superior (`y = 0`, ignora `top_margin`), con esquinas superiores rectas
+    /// y esquinas inferiores redondeadas.
+    Notch,
+}
+
+impl IslandStyle {
+    /// Interpreta `"island"` o `"notch"` (sin distinguir mayúsculas).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let trimmed = text.trim();
+        if trimmed.eq_ignore_ascii_case("island") {
+            Some(Self::Island)
+        } else if trimmed.eq_ignore_ascii_case("notch") {
+            Some(Self::Notch)
+        } else {
+            None
+        }
+    }
+
+    /// Nombre canónico del estilo en el archivo de configuración.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Island => "island",
+            Self::Notch => "notch",
+        }
+    }
+}
+
+impl fmt::Display for IslandStyle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Interpreta un booleano del formato de configuración (`true` o `false`).
 #[must_use]
 pub fn parse_bool(text: &str) -> Option<bool> {
@@ -298,9 +355,26 @@ impl Default for AppearanceSection {
     }
 }
 
-/// Sección `[behavior]`: reservada para el comportamiento configurable (ítem 12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BehaviorSection {}
+/// Sección `[behavior]`: tiempos de respuesta y estilo de la barra (ítem 12a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BehaviorSection {
+    /// Milisegundos que el mouse debe permanecer encima antes de expandir (`0..=2000`).
+    pub hover_delay_ms: u32,
+    /// Duración de la animación de expandir y contraer, en milisegundos (`0..=1000`).
+    pub animation_ms: u32,
+    /// Estilo visual y de anclaje (`island` o `notch`).
+    pub style: IslandStyle,
+}
+
+impl Default for BehaviorSection {
+    fn default() -> Self {
+        Self {
+            hover_delay_ms: DEFAULT_HOVER_DELAY_MS,
+            animation_ms: DEFAULT_ANIMATION_MS,
+            style: IslandStyle::Island,
+        }
+    }
+}
 
 /// Configuración completa de Atoll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -324,7 +398,7 @@ impl Config {
     /// Serializa la configuración en el formato canónico con comentarios explicativos.
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut out = String::with_capacity(768);
+        let mut out = String::with_capacity(960);
         out.push_str("# Configuración de Atoll\n");
         out.push_str(
             "# Todas las medidas están en píxeles lógicos a 96 DPI (100 % de escala).\n\n",
@@ -357,7 +431,15 @@ impl Config {
         ));
 
         out.push_str("[behavior]\n");
-        out.push_str("# Reservado para opciones de comportamiento.\n");
+        out.push_str("# Retardo antes de expandir al apoyar el mouse, en ms (0..2000).\n");
+        out.push_str(&format!(
+            "hover_delay_ms = {}\n",
+            self.behavior.hover_delay_ms
+        ));
+        out.push_str("# Duración de la animación de expandir y contraer, en ms (0..1000).\n");
+        out.push_str(&format!("animation_ms = {}\n", self.behavior.animation_ms));
+        out.push_str("# Estilo: \"island\" (flotante) o \"notch\" (muesca pegada arriba).\n");
+        out.push_str(&format!("style = {}\n", self.behavior.style));
         out
     }
 }
@@ -402,6 +484,16 @@ pub enum WarningKind {
         /// Valor rechazado tal como vino en el archivo.
         value: String,
     },
+    /// Se definió solo el tamaño en reposo mayor que el tamaño de hover por defecto,
+    /// por lo que se subió automáticamente el tamaño de hover para igualarlo.
+    HoverAdjusted {
+        /// Clave de hover ajustada (`hover_width` o `hover_height`).
+        hover_key: String,
+        /// Clave de reposo que provocó el ajuste (`width` o `height`).
+        rest_key: String,
+        /// Valor al que se subió el tamaño de hover.
+        adjusted_to: u32,
+    },
 }
 
 impl fmt::Display for WarningKind {
@@ -422,6 +514,14 @@ impl fmt::Display for WarningKind {
             } => write!(
                 f,
                 "valor inválido '{value}' para '{key}' en [{section}]; se usa el valor por defecto"
+            ),
+            Self::HoverAdjusted {
+                hover_key,
+                rest_key,
+                adjusted_to,
+            } => write!(
+                f,
+                "en [island], '{rest_key}' ({adjusted_to}) supera a '{hover_key}' por defecto; se ajustó '{hover_key} = {adjusted_to}'"
             ),
         }
     }
@@ -462,39 +562,66 @@ struct IslandOverrides {
 }
 
 impl IslandOverrides {
-    /// Resuelve `[island]` verificando que `hover_width >= width` y `hover_height >= height`.
+    /// Resuelve `[island]` garantizando `hover_width >= width` y `hover_height >= height`.
+    ///
+    /// Si solo se definió `width` (o `height`) y supera al `hover_*` por defecto,
+    /// conserva el valor y sube `hover_*` automáticamente, informándolo con
+    /// [`WarningKind::HoverAdjusted`]. Si ambos fueron definidos (o solo `hover_*`)
+    /// y `hover < reposo`, vuelve a los valores por defecto e informa [`WarningKind::InvalidValue`].
     fn resolve(self, warnings: &mut Vec<Warning>) -> IslandSection {
         let mut section = IslandSection::default();
         if let Some(top_margin) = self.top_margin {
             section.top_margin = top_margin;
         }
 
-        let width = self.width.as_ref().map_or(DEFAULT_WIDTH, |e| e.value);
-        let hover_width = self
-            .hover_width
-            .as_ref()
-            .map_or(DEFAULT_HOVER_WIDTH, |e| e.value);
-        if hover_width >= width {
-            section.width = width;
-            section.hover_width = hover_width;
-        } else if let Some(entry) = self.hover_width {
-            push_invalid(warnings, entry.line, "island", "hover_width", &entry.raw);
-        } else if let Some(entry) = self.width {
-            push_invalid(warnings, entry.line, "island", "width", &entry.raw);
+        match (self.width, self.hover_width) {
+            (Some(w), None) if w.value > DEFAULT_HOVER_WIDTH => {
+                section.width = w.value;
+                section.hover_width = w.value;
+                warnings.push(Warning {
+                    line: w.line,
+                    kind: WarningKind::HoverAdjusted {
+                        hover_key: "hover_width".to_owned(),
+                        rest_key: "width".to_owned(),
+                        adjusted_to: w.value,
+                    },
+                });
+            }
+            (w_opt, hw_opt) => {
+                let width = w_opt.as_ref().map_or(DEFAULT_WIDTH, |e| e.value);
+                let hover_width = hw_opt.as_ref().map_or(DEFAULT_HOVER_WIDTH, |e| e.value);
+                if hover_width >= width {
+                    section.width = width;
+                    section.hover_width = hover_width;
+                } else if let Some(hw) = hw_opt {
+                    push_invalid(warnings, hw.line, "island", "hover_width", &hw.raw);
+                }
+            }
         }
 
-        let height = self.height.as_ref().map_or(DEFAULT_HEIGHT, |e| e.value);
-        let hover_height = self
-            .hover_height
-            .as_ref()
-            .map_or(DEFAULT_HOVER_HEIGHT, |e| e.value);
-        if hover_height >= height {
-            section.height = height;
-            section.hover_height = hover_height;
-        } else if let Some(entry) = self.hover_height {
-            push_invalid(warnings, entry.line, "island", "hover_height", &entry.raw);
-        } else if let Some(entry) = self.height {
-            push_invalid(warnings, entry.line, "island", "height", &entry.raw);
+        match (self.height, self.hover_height) {
+            (Some(h), None) if h.value > DEFAULT_HOVER_HEIGHT => {
+                section.height = h.value;
+                section.hover_height = h.value;
+                warnings.push(Warning {
+                    line: h.line,
+                    kind: WarningKind::HoverAdjusted {
+                        hover_key: "hover_height".to_owned(),
+                        rest_key: "height".to_owned(),
+                        adjusted_to: h.value,
+                    },
+                });
+            }
+            (h_opt, hh_opt) => {
+                let height = h_opt.as_ref().map_or(DEFAULT_HEIGHT, |e| e.value);
+                let hover_height = hh_opt.as_ref().map_or(DEFAULT_HOVER_HEIGHT, |e| e.value);
+                if hover_height >= height {
+                    section.height = height;
+                    section.hover_height = hover_height;
+                } else if let Some(hh) = hh_opt {
+                    push_invalid(warnings, hh.line, "island", "hover_height", &hh.raw);
+                }
+            }
         }
 
         section
@@ -625,13 +752,7 @@ pub fn parse(text: &str) -> (Config, Vec<Warning>) {
                 );
             }
             ActiveSection::Behavior => {
-                warnings.push(Warning {
-                    line: line_no,
-                    kind: WarningKind::UnknownKey {
-                        section: "behavior".to_owned(),
-                        key: key.to_owned(),
-                    },
-                });
+                parse_behavior_key(&mut config.behavior, key, value, line_no, &mut warnings);
             }
         }
     }
@@ -780,6 +901,51 @@ fn parse_appearance_key(
     }
 }
 
+/// Procesa un par `clave = valor` dentro de `[behavior]`.
+fn parse_behavior_key(
+    behavior: &mut BehaviorSection,
+    key: &str,
+    value: &str,
+    line: usize,
+    warnings: &mut Vec<Warning>,
+) {
+    match key {
+        "hover_delay_ms" => {
+            if let Some(v) = parse_u32_range(value, 0, MAX_HOVER_DELAY_MS) {
+                behavior.hover_delay_ms = v;
+            } else {
+                behavior.hover_delay_ms = DEFAULT_HOVER_DELAY_MS;
+                push_invalid(warnings, line, "behavior", key, value);
+            }
+        }
+        "animation_ms" => {
+            if let Some(v) = parse_u32_range(value, 0, MAX_ANIMATION_MS) {
+                behavior.animation_ms = v;
+            } else {
+                behavior.animation_ms = DEFAULT_ANIMATION_MS;
+                push_invalid(warnings, line, "behavior", key, value);
+            }
+        }
+        "style" => {
+            if let Some(style) = IslandStyle::parse(value) {
+                behavior.style = style;
+            } else {
+                behavior.style = IslandStyle::Island;
+                push_invalid(warnings, line, "behavior", key, value);
+            }
+        }
+        _ => {
+            warnings.push(Warning {
+                line,
+                kind: WarningKind::UnknownKey {
+                    section: "behavior".to_owned(),
+                    key: key.to_owned(),
+                },
+            });
+        }
+    }
+}
+
 /// Agrega una advertencia de valor inválido.
 fn push_invalid(warnings: &mut Vec<Warning>, line: usize, section: &str, key: &str, value: &str) {
     warnings.push(Warning {
@@ -831,9 +997,9 @@ fn parse_u8_range(text: &str, min: u8, max: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, parse_bool, Color, Config, CornerRadius, Theme, Warning, WarningKind,
-        DEFAULT_HEIGHT, DEFAULT_HOVER_HEIGHT, DEFAULT_HOVER_WIDTH, DEFAULT_TOP_MARGIN,
-        DEFAULT_WIDTH,
+        parse, parse_bool, Color, Config, CornerRadius, IslandStyle, Theme, Warning, WarningKind,
+        DEFAULT_ANIMATION_MS, DEFAULT_HEIGHT, DEFAULT_HOVER_DELAY_MS, DEFAULT_HOVER_HEIGHT,
+        DEFAULT_HOVER_WIDTH, DEFAULT_TOP_MARGIN, DEFAULT_WIDTH,
     };
 
     #[test]
@@ -865,6 +1031,9 @@ mod tests {
         assert_eq!(cfg.appearance.text_color, Color::WHITE);
         assert_eq!(cfg.appearance.opacity, 100);
         assert_eq!(cfg.appearance.corner_radius, CornerRadius::Auto);
+        assert_eq!(cfg.behavior.hover_delay_ms, DEFAULT_HOVER_DELAY_MS);
+        assert_eq!(cfg.behavior.animation_ms, DEFAULT_ANIMATION_MS);
+        assert_eq!(cfg.behavior.style, IslandStyle::Island);
     }
 
     #[test]
@@ -885,6 +1054,9 @@ opacity = 85
 corner_radius = 18
 
 [behavior]
+hover_delay_ms = 350
+animation_ms = 240
+style = notch
 ";
         let (cfg, warnings) = parse(input);
         assert!(warnings.is_empty(), "sin advertencias: {warnings:?}");
@@ -901,18 +1073,22 @@ corner_radius = 18
         );
         assert_eq!(cfg.appearance.opacity, 85);
         assert_eq!(cfg.appearance.corner_radius, CornerRadius::Px(18));
+        assert_eq!(cfg.behavior.hover_delay_ms, 350);
+        assert_eq!(cfg.behavior.animation_ms, 240);
+        assert_eq!(cfg.behavior.style, IslandStyle::Notch);
     }
 
     #[test]
-    fn hover_size_smaller_than_rest_size_falls_back_to_defaults_with_warning() {
-        let input = "\
+    fn hover_size_auto_adjusts_when_only_rest_is_set_and_resets_when_both_conflict() {
+        // Caso 1: ambos definidos con hover < reposo -> vuelve a los valores por defecto.
+        let both_conflict = "\
 [island]
 width = 500
 hover_width = 440
 height = 80
 hover_height = 60
 ";
-        let (cfg, warnings) = parse(input);
+        let (cfg, warnings) = parse(both_conflict);
         assert_eq!(cfg.island.width, DEFAULT_WIDTH);
         assert_eq!(cfg.island.hover_width, DEFAULT_HOVER_WIDTH);
         assert_eq!(cfg.island.height, DEFAULT_HEIGHT);
@@ -939,22 +1115,39 @@ hover_height = 60
             ]
         );
 
-        // Si solo se indica `width = 600` (mayor que el `hover_width` por defecto 480),
-        // también se restaura el par por defecto y se informa en la línea de `width`.
-        let only_width = "[island]\nwidth = 600\n";
-        let (cfg2, warnings2) = parse(only_width);
-        assert_eq!(cfg2.island.width, DEFAULT_WIDTH);
-        assert_eq!(cfg2.island.hover_width, DEFAULT_HOVER_WIDTH);
+        // Caso 2: solo se define `width` (o `height`) mayor que el hover por defecto ->
+        // NO se descarta el valor válido; se sube automáticamente `hover_*` al mismo valor
+        // y se informa con una advertencia.
+        let only_rest = "\
+[island]
+width = 600
+height = 90
+";
+        let (cfg2, warnings2) = parse(only_rest);
+        assert_eq!(cfg2.island.width, 600);
+        assert_eq!(cfg2.island.hover_width, 600);
+        assert_eq!(cfg2.island.height, 90);
+        assert_eq!(cfg2.island.hover_height, 90);
         assert_eq!(
             warnings2,
-            vec![Warning {
-                line: 2,
-                kind: WarningKind::InvalidValue {
-                    section: "island".to_owned(),
-                    key: "width".to_owned(),
-                    value: "600".to_owned(),
+            vec![
+                Warning {
+                    line: 2,
+                    kind: WarningKind::HoverAdjusted {
+                        hover_key: "hover_width".to_owned(),
+                        rest_key: "width".to_owned(),
+                        adjusted_to: 600,
+                    },
                 },
-            }]
+                Warning {
+                    line: 3,
+                    kind: WarningKind::HoverAdjusted {
+                        hover_key: "hover_height".to_owned(),
+                        rest_key: "height".to_owned(),
+                        adjusted_to: 90,
+                    },
+                },
+            ]
         );
     }
 
@@ -989,6 +1182,10 @@ hover_height = 60
         assert_eq!(CornerRadius::parse("24"), Some(CornerRadius::Px(24)));
         assert_eq!(CornerRadius::parse("201"), None);
         assert_eq!(CornerRadius::parse("-5"), None);
+
+        assert_eq!(IslandStyle::parse("island"), Some(IslandStyle::Island));
+        assert_eq!(IslandStyle::parse("NOTCH"), Some(IslandStyle::Notch));
+        assert_eq!(IslandStyle::parse("bar"), None);
     }
 
     #[test]
@@ -1043,6 +1240,11 @@ background = #12345
 text_color = azul
 opacity = 150
 corner_radius = 999
+
+[behavior]
+hover_delay_ms = 2500
+animation_ms = 1500
+style = floating
 ";
         let (cfg, warnings) = parse(input);
         assert_eq!(cfg.island.width, DEFAULT_WIDTH);
@@ -1051,6 +1253,9 @@ corner_radius = 999
         assert_eq!(cfg.island.hover_height, DEFAULT_HOVER_HEIGHT);
         assert_eq!(cfg.island.top_margin, DEFAULT_TOP_MARGIN);
         assert_eq!(cfg.appearance, Theme::Black.appearance());
+        assert_eq!(cfg.behavior.hover_delay_ms, DEFAULT_HOVER_DELAY_MS);
+        assert_eq!(cfg.behavior.animation_ms, DEFAULT_ANIMATION_MS);
+        assert_eq!(cfg.behavior.style, IslandStyle::Island);
 
         let expected = vec![
             Warning {
@@ -1131,6 +1336,30 @@ corner_radius = 999
                     section: "appearance".to_owned(),
                     key: "corner_radius".to_owned(),
                     value: "999".to_owned(),
+                },
+            },
+            Warning {
+                line: 16,
+                kind: WarningKind::InvalidValue {
+                    section: "behavior".to_owned(),
+                    key: "hover_delay_ms".to_owned(),
+                    value: "2500".to_owned(),
+                },
+            },
+            Warning {
+                line: 17,
+                kind: WarningKind::InvalidValue {
+                    section: "behavior".to_owned(),
+                    key: "animation_ms".to_owned(),
+                    value: "1500".to_owned(),
+                },
+            },
+            Warning {
+                line: 18,
+                kind: WarningKind::InvalidValue {
+                    section: "behavior".to_owned(),
+                    key: "style".to_owned(),
+                    value: "floating".to_owned(),
                 },
             },
         ];
@@ -1214,6 +1443,11 @@ background = #11223344
 text_color = #FAFAFA
 opacity = 90
 corner_radius = 14
+
+[behavior]
+hover_delay_ms = 400
+animation_ms = 0
+style = notch
 ";
         let (custom, w1) = parse(custom_input);
         assert!(w1.is_empty());

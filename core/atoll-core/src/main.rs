@@ -44,18 +44,19 @@ fn config_paths_from_appdata(appdata: Option<OsString>) -> Option<(PathBuf, Path
 /// Abre la isla con la configuración de `%APPDATA%\Atoll\config.ini` (o la por defecto)
 /// y espera a que se cierre.
 fn run() -> Result<(), Box<dyn Error>> {
-    let (config, config_dir, config_file) = match config_paths_from_appdata(env::var_os("APPDATA"))
-    {
-        Some((dir, file)) => {
-            let loaded = load_or_create_config(&dir, &file);
-            (loaded, Some(dir), Some(file))
-        }
-        None => (Config::default(), None, None),
-    };
+    let (config, initial_warnings, config_dir, config_file) =
+        match config_paths_from_appdata(env::var_os("APPDATA")) {
+            Some((dir, file)) => {
+                let (loaded, warnings) = load_or_create_config(&dir, &file);
+                (loaded, warnings, Some(dir), Some(file))
+            }
+            None => (Config::default(), Vec::new(), None, None),
+        };
 
     let island_config = island_config_from(&config, config_dir.clone());
     let mut backend = native_backend()?;
-    let painter = IslandPainter::from_config(config, config_dir, config_file)?;
+    let painter = IslandPainter::from_config(config, config_dir, config_file)?
+        .with_initial_warnings(initial_warnings);
     backend.run(&island_config, Box::new(painter))?;
     Ok(())
 }

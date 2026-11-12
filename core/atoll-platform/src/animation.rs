@@ -1,9 +1,8 @@
-//! Animación de la isla: expandir al pasar el mouse y contraer al sacarlo.
+//! Animación de la isla y lógica del retardo de hover.
 //!
 //! Es lógica pura, sin código de ningún sistema operativo: el backend le avisa
-//! cuándo entra o sale el mouse y le pide el tamaño en cada tick del timer.
-//! El timer solo existe mientras dura la animación, así que en reposo no hay
-//! ningún trabajo pendiente.
+//! cuándo entra o sale el mouse, cuándo vence el retardo de hover y le pide el
+//! tamaño en cada tick del timer de animación. Ningún timer queda activo en reposo.
 
 use std::time::{Duration, Instant};
 
@@ -27,12 +26,33 @@ pub struct Step {
     pub finished: bool,
 }
 
-/// Máquina de estados de la animación de hover.
+/// Acción que el backend debe ejecutar tras un evento del mouse o del timer de retardo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverAction {
+    /// No hay nada que hacer (por ejemplo, movimiento del mouse cuando ya estaba adentro).
+    None,
+    /// Armar el timer de un solo disparo del retardo de hover por `delay_ms` milisegundos.
+    ArmDelayTimer {
+        /// Milisegundos a esperar con el mouse adentro antes de empezar a expandir.
+        delay_ms: u32,
+    },
+    /// Cancelar el timer de retardo porque el mouse salió antes de que venciera.
+    CancelDelayTimer,
+    /// Empezar la animación de expansión de la isla.
+    StartExpand,
+    /// Empezar la animación de contracción de la isla (siempre sin retardo).
+    StartCollapse,
+}
+
+/// Máquina de estados de la animación y del retardo de hover.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Animator {
     collapsed: Size,
     expanded: Size,
     duration: Duration,
+    hover_delay_ms: u32,
+    pointer_inside: bool,
+    delay_pending: bool,
     hovering: bool,
     animating: bool,
     start: Instant,
@@ -42,13 +62,16 @@ pub struct Animator {
 }
 
 impl Animator {
-    /// Crea un animador en reposo, con la isla contraída.
+    /// Crea un animador en reposo, con la isla contraída y sin retardo de hover.
     #[must_use]
     pub fn new(collapsed: Size, expanded: Size, duration: Duration, now: Instant) -> Self {
         Self {
             collapsed,
             expanded,
             duration,
+            hover_delay_ms: 0,
+            pointer_inside: false,
+            delay_pending: false,
             hovering: false,
             animating: false,
             start: now,
@@ -58,27 +81,134 @@ impl Animator {
         }
     }
 
+    /// Configura el retardo de hover (`hover_delay_ms`) y la duración de la animación (`duration`).
+    #[must_use]
+    pub const fn with_timing(mut self, hover_delay_ms: u32, duration: Duration) -> Self {
+        self.hover_delay_ms = hover_delay_ms;
+        self.duration = duration;
+        self
+    }
+
+    /// Actualiza en caliente el retardo de hover y la duración de la animación.
+    pub fn set_timing(&mut self, hover_delay_ms: u32, duration: Duration) {
+        self.hover_delay_ms = hover_delay_ms;
+        self.duration = duration;
+    }
+
+    /// Duración configurada para expandir y contraer.
+    #[must_use]
+    pub const fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Retardo configurado antes de expandir al entrar el mouse, en milisegundos.
+    #[must_use]
+    pub const fn hover_delay_ms(&self) -> u32 {
+        self.hover_delay_ms
+    }
+
     /// Tamaño actual de la isla.
     #[must_use]
     pub const fn size(&self) -> Size {
         self.current
     }
 
-    /// Indica si el mouse está sobre la isla.
+    /// Indica si la isla está en estado expandido (o expandiéndose).
     #[must_use]
     pub const fn is_hovering(&self) -> bool {
         self.hovering
     }
 
-    /// Informa que el mouse entró (`true`) o salió (`false`) de la isla.
+    /// Indica si el puntero del mouse está actualmente dentro de la isla.
+    #[must_use]
+    pub const fn is_pointer_inside(&self) -> bool {
+        self.pointer_inside
+    }
+
+    /// Registra que el mouse entró (o se movió dentro) de la isla y devuelve la acción a tomar.
     ///
-    /// Devuelve `true` si hay que arrancar el timer, es decir, si el estado
+    /// - Si el mouse ya estaba adentro, devuelve [`HoverAction::None`].
+    /// - Si `hover_delay_ms == 0`, arranca la expansión de inmediato ([`HoverAction::StartExpand`]).
+    /// - Si `hover_delay_ms > 0`, pide armar el timer de un solo disparo ([`HoverAction::ArmDelayTimer`]).
+    pub fn on_mouse_enter(&mut self, now: Instant) -> HoverAction {
+        if self.pointer_inside {
+            return HoverAction::None;
+        }
+        self.pointer_inside = true;
+
+        if self.hovering {
+            self.delay_pending = false;
+            return HoverAction::None;
+        }
+
+        if self.hover_delay_ms == 0 {
+            self.delay_pending = false;
+            self.start_transition(true, now);
+            HoverAction::StartExpand
+        } else {
+            self.delay_pending = true;
+            HoverAction::ArmDelayTimer {
+                delay_ms: self.hover_delay_ms,
+            }
+        }
+    }
+
+    /// Registra que el mouse salió de la isla y devuelve la acción a tomar.
+    ///
+    /// - Si había un retardo pendiente sin vencer, lo cancela ([`HoverAction::CancelDelayTimer`])
+    ///   y la isla no llega a expandirse.
+    /// - Si la isla estaba expandida o expandiéndose, empieza a contraer de inmediato sin retardo
+    ///   ([`HoverAction::StartCollapse`]).
+    pub fn on_mouse_leave(&mut self, now: Instant) -> HoverAction {
+        self.pointer_inside = false;
+
+        if self.delay_pending {
+            self.delay_pending = false;
+            return HoverAction::CancelDelayTimer;
+        }
+
+        if self.hovering {
+            self.start_transition(false, now);
+            return HoverAction::StartCollapse;
+        }
+
+        HoverAction::None
+    }
+
+    /// Notifica que venció el timer del retardo de hover.
+    ///
+    /// Si el mouse sigue adentro y el retardo seguía pendiente, comienza a expandir la isla
+    /// ([`HoverAction::StartExpand`]); en caso contrario devuelve [`HoverAction::None`].
+    pub fn on_delay_elapsed(&mut self, now: Instant) -> HoverAction {
+        if !self.delay_pending || !self.pointer_inside {
+            self.delay_pending = false;
+            return HoverAction::None;
+        }
+        self.delay_pending = false;
+        if self.hovering {
+            return HoverAction::None;
+        }
+        self.start_transition(true, now);
+        HoverAction::StartExpand
+    }
+
+    /// Informa directamente que el estado de hover cambió a `hovering` (sin retardo).
+    ///
+    /// Devuelve `true` si hay que arrancar la animación, es decir, si el estado
     /// cambió. Si ya había una animación en curso, la nueva parte desde el
     /// tamaño actual, sin saltos.
     pub fn set_hover(&mut self, hovering: bool, now: Instant) -> bool {
+        self.pointer_inside = hovering;
+        self.delay_pending = false;
         if self.hovering == hovering {
             return false;
         }
+        self.start_transition(hovering, now);
+        true
+    }
+
+    /// Inicia una transición hacia expandido (`true`) o contraído (`false`) desde el tamaño actual.
+    fn start_transition(&mut self, hovering: bool, now: Instant) {
         self.hovering = hovering;
         self.from = as_floats(self.current);
         self.to = as_floats(if hovering {
@@ -88,20 +218,21 @@ impl Animator {
         });
         self.start = now;
         self.animating = true;
-        true
     }
 
     /// Reconfigura los tamaños de reposo y expandido (por ejemplo al recargar
     /// la configuración o cambiar el DPI).
     ///
-    /// No anima: cancela cualquier animación en curso y salta de inmediato al
-    /// tamaño nuevo que corresponde al estado actual (expandido si el mouse está
-    /// encima, contraído si no). El estado de hover se conserva.
+    /// No anima: cancela cualquier animación o retardo en curso y salta de inmediato al
+    /// tamaño nuevo que corresponde al estado actual (expandido si el hover ya estaba
+    /// activo, contraído si no). El estado de hover se conserva.
     pub fn reconfigure(&mut self, collapsed: Size, expanded: Size) {
         self.collapsed = collapsed;
         self.expanded = expanded;
         self.current = if self.hovering { expanded } else { collapsed };
         self.animating = false;
+        self.delay_pending = false;
+        self.pointer_inside = self.hovering;
         self.from = as_floats(self.current);
         self.to = self.from;
     }
@@ -156,7 +287,7 @@ fn lerp(a: f32, b: f32, t: f32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ease_out_cubic, Animator};
+    use super::{ease_out_cubic, Animator, HoverAction};
     use atoll_render::Size;
     use std::time::{Duration, Instant};
 
@@ -186,6 +317,7 @@ mod tests {
         let mut anim = animator(t0);
         assert_eq!(anim.size(), SMALL);
         assert!(!anim.is_hovering());
+        assert!(!anim.is_pointer_inside());
         assert!(anim.tick(t0).finished);
     }
 
@@ -302,5 +434,85 @@ mod tests {
         assert!(anim.is_hovering());
         assert_eq!(anim.size(), Size::new(600, 80));
         assert!(anim.tick(now + DURATION).finished);
+    }
+
+    #[test]
+    fn zero_delay_expands_on_enter_and_collapses_on_leave_immediately() {
+        let t0 = Instant::now();
+        let mut anim = Animator::new(SMALL, BIG, DURATION, t0).with_timing(0, DURATION);
+
+        assert_eq!(anim.on_mouse_enter(t0), HoverAction::StartExpand);
+        assert!(anim.is_hovering());
+        assert!(anim.is_pointer_inside());
+        // Movimientos repetidos dentro de la isla no rearman nada.
+        assert_eq!(anim.on_mouse_enter(t0), HoverAction::None);
+
+        let t1 = t0 + Duration::from_millis(100);
+        assert_eq!(anim.on_mouse_leave(t1), HoverAction::StartCollapse);
+        assert!(!anim.is_hovering());
+        assert!(!anim.is_pointer_inside());
+    }
+
+    #[test]
+    fn hover_delay_arms_timer_and_leaving_before_expiry_cancels_without_expanding() {
+        let t0 = Instant::now();
+        let mut anim = Animator::new(SMALL, BIG, DURATION, t0).with_timing(400, DURATION);
+
+        assert_eq!(
+            anim.on_mouse_enter(t0),
+            HoverAction::ArmDelayTimer { delay_ms: 400 }
+        );
+        assert!(!anim.is_hovering());
+        assert!(anim.is_pointer_inside());
+        assert_eq!(anim.size(), SMALL);
+
+        // Movimientos repetidos mientras corre el retardo no rearman el timer.
+        assert_eq!(
+            anim.on_mouse_enter(t0 + Duration::from_millis(50)),
+            HoverAction::None
+        );
+
+        // El mouse sale antes de los 400 ms: se cancela el timer y nunca llega a expandir.
+        let t_leave = t0 + Duration::from_millis(150);
+        assert_eq!(anim.on_mouse_leave(t_leave), HoverAction::CancelDelayTimer);
+        assert!(!anim.is_hovering());
+        assert!(!anim.is_pointer_inside());
+        assert_eq!(anim.size(), SMALL);
+        assert!(anim.tick(t_leave).finished);
+
+        // Si por carrera llegara un disparo tardío del timer, se ignora.
+        assert_eq!(
+            anim.on_delay_elapsed(t0 + Duration::from_millis(400)),
+            HoverAction::None
+        );
+        assert!(!anim.is_hovering());
+    }
+
+    #[test]
+    fn hover_delay_expands_when_elapsed_and_collapses_without_delay_on_leave() {
+        let t0 = Instant::now();
+        let mut anim = Animator::new(SMALL, BIG, DURATION, t0).with_timing(400, DURATION);
+
+        assert_eq!(
+            anim.on_mouse_enter(t0),
+            HoverAction::ArmDelayTimer { delay_ms: 400 }
+        );
+
+        let t_elapsed = t0 + Duration::from_millis(400);
+        assert_eq!(anim.on_delay_elapsed(t_elapsed), HoverAction::StartExpand);
+        assert!(anim.is_hovering());
+
+        // Avanza la expansión hasta terminar.
+        let end = anim.tick(t_elapsed + DURATION);
+        assert!(end.finished);
+        assert_eq!(end.size, BIG);
+
+        // Al salir el mouse, contrae de inmediato sin ningún retardo.
+        let t_leave = t_elapsed + DURATION + Duration::from_millis(50);
+        assert_eq!(anim.on_mouse_leave(t_leave), HoverAction::StartCollapse);
+        assert!(!anim.is_hovering());
+        let collapsed = anim.tick(t_leave + DURATION);
+        assert!(collapsed.finished);
+        assert_eq!(collapsed.size, SMALL);
     }
 }
