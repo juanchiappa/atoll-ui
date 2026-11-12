@@ -11,10 +11,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use atoll_config::{Color as ConfigColor, Config, CornerRadius, Warning};
+use atoll_config::{Color as ConfigColor, Config, CornerRadius, IslandStyle, Warning};
 use atoll_platform::dpi::scale_px;
 use atoll_platform::{IslandConfig, LocalTime, Painter};
-use atoll_render::{render_island_with, Color, Frame, RenderError, Size, TextRenderer};
+use atoll_render::{
+    render_island_styled, Color, CornerRadii, Frame, RenderError, Size, TextRenderer,
+};
 
 /// Días de la semana abreviados, empezando por el domingo.
 const WEEKDAYS: [&str; 7] = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
@@ -60,13 +62,21 @@ pub fn format_date(time: &LocalTime) -> String {
 }
 
 /// Construye [`IslandConfig`] a partir de [`Config`] y la carpeta opcional de recarga en vivo.
+///
+/// En modo [`IslandStyle::Notch`], `top_margin` se fuerza a `0` para que la muesca
+/// quede pegada al borde superior de la pantalla.
 #[must_use]
 pub fn island_config_from(config: &Config, config_dir: Option<PathBuf>) -> IslandConfig {
+    let top_margin = match config.behavior.style {
+        IslandStyle::Island => config.island.top_margin,
+        IslandStyle::Notch => 0,
+    };
     let base = IslandConfig::new(
         Size::new(config.island.width, config.island.height),
         Size::new(config.island.hover_width, config.island.hover_height),
-        config.island.top_margin,
-    );
+        top_margin,
+    )
+    .with_behavior(config.behavior.hover_delay_ms, config.behavior.animation_ms);
     match config_dir {
         Some(dir) => base.with_config_dir(dir),
         None => base,
@@ -86,6 +96,7 @@ pub fn effective_color(color: ConfigColor, opacity: u8) -> Color {
 ///
 /// Devuelve `None` cuando es [`CornerRadius::Auto`] (píldora).
 #[must_use]
+#[allow(dead_code)]
 pub fn physical_corner_radius(radius: CornerRadius, scale: f32) -> Option<f32> {
     match radius {
         CornerRadius::Auto => None,
@@ -93,7 +104,39 @@ pub fn physical_corner_radius(radius: CornerRadius, scale: f32) -> Option<f32> {
     }
 }
 
-/// Imprime en `stderr` todas las advertencias producidas por el parser de configuración.
+/// Calcula los radios físicos de las cuatro esquinas según el tamaño físico `size`,
+/// el radio lógico `radius`, el estilo `style` (`island` o `notch`) y el factor `scale`.
+#[must_use]
+pub fn physical_corner_radii(
+    size: Size,
+    radius: CornerRadius,
+    style: IslandStyle,
+    scale: f32,
+) -> CornerRadii {
+    let base = match radius {
+        CornerRadius::Auto => (size.width.min(size.height) as f32) / 2.0,
+        CornerRadius::Px(px) => (px as f32) * scale,
+    };
+    match style {
+        IslandStyle::Island => CornerRadii::uniform(base),
+        IslandStyle::Notch => CornerRadii::bottom_only(base),
+    }
+}
+
+/// Filtra `current` conservando únicamente las advertencias que no estaban en `previous`.
+///
+/// Sirve para no repetir por `stderr` advertencias idénticas a las de la carga anterior
+/// cuando se recarga `config.ini`.
+#[must_use]
+pub fn filter_new_warnings(previous: &[Warning], current: &[Warning]) -> Vec<Warning> {
+    current
+        .iter()
+        .filter(|warning| !previous.contains(warning))
+        .cloned()
+        .collect()
+}
+
+/// Imprime en `stderr` todas las advertencias recibidas.
 pub fn report_warnings(warnings: &[Warning]) {
     for warning in warnings {
         eprintln!("atoll: config.ini ({warning})");
@@ -103,30 +146,33 @@ pub fn report_warnings(warnings: &[Warning]) {
 /// Carga `config.ini` desde `file` o lo crea (junto con `dir`) con los valores por defecto.
 ///
 /// Nunca falla: si no se puede crear o leer, usa [`Config::default`]; si tiene advertencias,
-/// las escribe en `stderr`.
+/// las escribe en `stderr` y las devuelve para que la recarga en vivo no las repita si
+/// siguen iguales.
 #[must_use]
-pub fn load_or_create_config(dir: &Path, file: &Path) -> Config {
+pub fn load_or_create_config(dir: &Path, file: &Path) -> (Config, Vec<Warning>) {
     if !file.exists() {
         if fs::create_dir_all(dir).is_ok() {
             let _ = fs::write(file, Config::default().to_text());
         }
-        return Config::default();
+        return (Config::default(), Vec::new());
     }
     let Ok(text) = fs::read_to_string(file) else {
-        return Config::default();
+        return (Config::default(), Vec::new());
     };
     let (config, warnings) = atoll_config::parse(&text);
     report_warnings(&warnings);
-    config
+    (config, warnings)
 }
 
-/// Dibuja la isla con la hora y la fecha, aplicando el tema y los tamaños de [`Config`].
+/// Dibuja la isla con la hora y la fecha, aplicando el tema, el estilo y los tamaños de [`Config`].
 #[derive(Debug)]
 pub struct IslandPainter {
     text: TextRenderer,
     config: Config,
     config_dir: Option<PathBuf>,
     config_file: Option<PathBuf>,
+    /// Advertencias emitidas en la última carga o recarga, para no repetir las idénticas.
+    last_warnings: Vec<Warning>,
     /// Escala con la que se dibujó el último cuadro (bits del `f32`), para saber cuándo cambia.
     last_scale: u32,
 }
@@ -162,8 +208,16 @@ impl IslandPainter {
             config,
             config_dir,
             config_file,
+            last_warnings: Vec::new(),
             last_scale: 1.0_f32.to_bits(),
         })
+    }
+
+    /// Registra las advertencias emitidas en la carga inicial para no repetirlas en la primera recarga.
+    #[must_use]
+    pub fn with_initial_warnings(mut self, warnings: Vec<Warning>) -> Self {
+        self.last_warnings = warnings;
+        self
     }
 
     /// Configuración actual aplicada en el painter.
@@ -185,11 +239,14 @@ impl IslandPainter {
         Some(island_config_from(&self.config, self.config_dir.clone()))
     }
 
-    /// Parsea `text` y aplica la nueva [`Config`] solo si cambió respecto de la actual.
+    /// Parsea `text`, aplica la nueva [`Config`] solo si cambió respecto de la actual,
+    /// y devuelve únicamente las advertencias **nuevas** que no estaban en la carga anterior.
     pub fn reload_from_text(&mut self, text: &str) -> (Option<IslandConfig>, Vec<Warning>) {
         let (parsed, warnings) = atoll_config::parse(text);
+        let new_warnings = filter_new_warnings(&self.last_warnings, &warnings);
+        self.last_warnings = warnings;
         let updated = self.apply_config_if_changed(parsed);
-        (updated, warnings)
+        (updated, new_warnings)
     }
 
     /// Qué tan expandida está la isla: 0,0 en reposo y 1,0 con hover.
@@ -223,8 +280,13 @@ impl IslandPainter {
 
         let appearance = self.config.appearance;
         let bg_color = effective_color(appearance.background, appearance.opacity);
-        let radius = physical_corner_radius(appearance.corner_radius, scale);
-        let mut frame = render_island_with(size, bg_color, radius)?;
+        let radii = physical_corner_radii(
+            size,
+            appearance.corner_radius,
+            self.config.behavior.style,
+            scale,
+        );
+        let mut frame = render_island_styled(size, bg_color, radii)?;
 
         let progress = self.progress(size, scale);
         let width = size.width as f32;
@@ -289,8 +351,8 @@ impl Painter for IslandPainter {
         let path = self.config_file.as_ref()?;
         // Si el archivo está bloqueado, a medio escribir o fue borrado, conservamos la actual.
         let text = fs::read_to_string(path).ok()?;
-        let (updated, warnings) = self.reload_from_text(&text);
-        report_warnings(&warnings);
+        let (updated, new_warnings) = self.reload_from_text(&text);
+        report_warnings(&new_warnings);
         updated
     }
 }
@@ -301,12 +363,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        effective_color, format_date, format_time, island_config_from, load_or_create_config,
-        physical_corner_radius, IslandPainter,
+        effective_color, filter_new_warnings, format_date, format_time, island_config_from,
+        load_or_create_config, physical_corner_radii, physical_corner_radius, IslandPainter,
     };
-    use atoll_config::{Color as ConfigColor, Config, CornerRadius, Theme};
+    use atoll_config::{Color as ConfigColor, Config, CornerRadius, Theme, Warning, WarningKind};
     use atoll_platform::{LocalTime, Painter};
-    use atoll_render::{Color, Frame, Size};
+    use atoll_render::{Color, CornerRadii, Frame, Size};
 
     const REST: Size = Size::new(400, 40);
     const HOVER: Size = Size::new(480, 64);
@@ -590,6 +652,11 @@ top_margin = 14
 theme = graphite
 opacity = 50
 corner_radius = 12
+
+[behavior]
+hover_delay_ms = 350
+animation_ms = 240
+style = island
 ",
         );
         assert!(warnings.is_empty());
@@ -599,6 +666,8 @@ corner_radius = 12
         assert_eq!(island_cfg.size, Size::new(440, 48));
         assert_eq!(island_cfg.hover_size, Size::new(560, 76));
         assert_eq!(island_cfg.top_margin, 14);
+        assert_eq!(island_cfg.hover_delay_ms, 350);
+        assert_eq!(island_cfg.animation_ms, 240);
         assert_eq!(island_cfg.config_dir, Some(dir));
 
         let eff_bg = effective_color(cfg.appearance.background, cfg.appearance.opacity);
@@ -608,6 +677,42 @@ corner_radius = 12
             Some(18.0)
         );
         assert_eq!(physical_corner_radius(CornerRadius::Auto, 2.0), None);
+    }
+
+    #[test]
+    fn notch_style_forces_zero_top_margin_and_renders_opaque_top_left_with_rounded_bottom() {
+        let (cfg, warnings) = atoll_config::parse(
+            "
+[island]
+top_margin = 20
+
+[appearance]
+corner_radius = 16
+
+[behavior]
+style = notch
+",
+        );
+        assert!(warnings.is_empty());
+
+        let island_cfg = island_config_from(&cfg, None);
+        assert_eq!(
+            island_cfg.top_margin, 0,
+            "en modo notch se ignora top_margin y la ventana va en y = 0"
+        );
+        assert_eq!(
+            physical_corner_radii(REST, cfg.appearance.corner_radius, cfg.behavior.style, 1.0),
+            CornerRadii::bottom_only(16.0)
+        );
+
+        let mut p = IslandPainter::from_config(cfg, None, None).expect("painter");
+        let frame = paint(&mut p, REST, saturday());
+
+        // Esquina superior izquierda recta y opaca; inferiores redondeadas y transparentes.
+        assert_eq!(pixel(&frame, 0, 0)[3], 255);
+        assert_eq!(pixel(&frame, REST.width - 1, 0)[3], 255);
+        assert_eq!(pixel(&frame, 0, REST.height - 1)[3], 0);
+        assert_eq!(pixel(&frame, REST.width - 1, REST.height - 1)[3], 0);
     }
 
     #[test]
@@ -668,6 +773,62 @@ corner_radius = 12
     }
 
     #[test]
+    fn reload_suppresses_identical_warnings_and_reports_only_new_ones() {
+        let w_unknown = Warning {
+            line: 2,
+            kind: WarningKind::UnknownKey {
+                section: "island".to_owned(),
+                key: "foo".to_owned(),
+            },
+        };
+        let w_invalid = Warning {
+            line: 3,
+            kind: WarningKind::InvalidValue {
+                section: "behavior".to_owned(),
+                key: "style".to_owned(),
+                value: "circle".to_owned(),
+            },
+        };
+
+        // Comparación directa con `filter_new_warnings`.
+        assert_eq!(
+            filter_new_warnings(&[], std::slice::from_ref(&w_unknown)),
+            vec![w_unknown.clone()]
+        );
+        assert!(
+            filter_new_warnings(
+                std::slice::from_ref(&w_unknown),
+                std::slice::from_ref(&w_unknown)
+            )
+            .is_empty(),
+            "advertencia idéntica no se repite"
+        );
+        assert_eq!(
+            filter_new_warnings(
+                std::slice::from_ref(&w_unknown),
+                &[w_unknown.clone(), w_invalid.clone()]
+            ),
+            vec![w_invalid]
+        );
+
+        // Flujo integrado en `IslandPainter::reload_from_text`.
+        let mut p = painter();
+        let text1 = "[island]\nfoo = 1\n";
+        let (_, first_warnings) = p.reload_from_text(text1);
+        assert_eq!(first_warnings.len(), 1);
+
+        // Recargar el mismo texto con la misma advertencia no devuelve advertencias nuevas.
+        let (_, second_warnings) = p.reload_from_text(text1);
+        assert!(second_warnings.is_empty());
+
+        // Si se agrega una segunda línea inválida, solo sale la nueva.
+        let text2 = "[island]\nfoo = 1\n[behavior]\nstyle = circle\n";
+        let (_, third_warnings) = p.reload_from_text(text2);
+        assert_eq!(third_warnings.len(), 1);
+        assert_eq!(third_warnings[0].line, 4);
+    }
+
+    #[test]
     fn missing_or_deleted_config_file_is_handled_gracefully() {
         let mut temp_dir = std::env::temp_dir();
         temp_dir.push(format!("atoll_test_config_{}", std::process::id()));
@@ -675,12 +836,14 @@ corner_radius = 12
         let file = temp_dir.join("config.ini");
 
         // Si no existe, `load_or_create_config` lo crea con los valores por defecto.
-        let initial = load_or_create_config(&temp_dir, &file);
+        let (initial, initial_warnings) = load_or_create_config(&temp_dir, &file);
         assert_eq!(initial, Config::default());
+        assert!(initial_warnings.is_empty());
         assert!(file.exists());
 
         let mut p = IslandPainter::from_config(initial, Some(temp_dir.clone()), Some(file.clone()))
-            .expect("painter");
+            .expect("painter")
+            .with_initial_warnings(initial_warnings);
 
         // Editamos el archivo en disco y recargamos.
         fs::write(&file, "[appearance]\ntheme = graphite\n").expect("escribe");

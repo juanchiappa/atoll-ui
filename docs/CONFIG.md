@@ -8,7 +8,7 @@ La configuración de Atoll usa un formato de texto propio estilo INI, implementa
 - **Creación automática:** si el archivo no existe al iniciar Atoll, se crean la carpeta `%APPDATA%\Atoll` y `config.ini` con `Config::default().to_text()`. Si `APPDATA` no está definido o la creación falla, Atoll arranca con `Config::default()` sin error.
 - **Recarga en vivo:** mientras Atoll está abierto, un hilo auxiliar con pila reducida (64 KB) queda bloqueado en `ReadDirectoryChangesW` sobre `%APPDATA%\Atoll` (0% de CPU en reposo, sin polling). Cuando se modifica `config.ini` (o un editor guarda escribiendo un temporal y renombrándolo a `config.ini`), envía `WM_APP + 1` a la ventana, que aplica un debounce de un solo disparo de **50 ms**.
 - **Aplicación sin parpadeos:** al cumplirse los 50 ms se relee `config.ini`. Si el archivo está bloqueado, a medio escribir o fue borrado, se conserva la configuración actual. Si se lee y la `Config` resultante **cambió** respecto de la actual, se reconfigura el animador instantáneamente (`Animator::reconfigure`, conservando el estado de hover) y se redibuja una sola vez.
-- **Advertencias:** cualquier advertencia del parser (al iniciar o al recargar) se informa por `stderr`, sin abrir ventanas emergentes.
+- **Advertencias sin duplicados:** cualquier advertencia del parser se informa por `stderr`, sin abrir ventanas emergentes. En cada recarga en vivo se imprimen únicamente las advertencias **nuevas** que no estaban presentes en la carga o recarga inmediata anterior.
 
 ## Reglas del formato
 
@@ -18,7 +18,10 @@ La configuración de Atoll usa un formato de texto propio estilo INI, implementa
 - **Tolerancia a fallos:** el parser (`atoll_config::parse`) **nunca falla**. Devuelve siempre una `Config` válida junto con una lista de advertencias (`Warning`) con el número de línea (empezando en 1):
   - Un archivo vacío o solo con comentarios produce `Config::default()`.
   - Las secciones o claves desconocidas se ignoran y generan una advertencia (compatibilidad hacia adelante).
-  - Los valores inválidos o fuera de rango (incluyendo `hover_width < width` o `hover_height < height`) caen al valor por defecto (o al del preset `theme` en `[appearance]`) y generan una advertencia.
+  - Los valores inválidos o fuera de rango caen al valor por defecto (o al del preset `theme` en `[appearance]`) y generan una advertencia.
+  - **Relación `hover` vs. reposo en `[island]`:**
+    - Si solo se define `width` (o `height`) y su valor es mayor que `hover_width` (`480`) o `hover_height` (`64`) por defecto, **no se descarta** el valor válido: se sube automáticamente `hover_width = width` (o `hover_height = height`) y se informa con una advertencia (`WarningKind::HoverAdjusted`).
+    - Solo se vuelve a ambos valores por defecto cuando ambos están definidos (o solo se definió `hover_*`) y `hover < reposo` (`WarningKind::HoverSmallerThanRest`).
 
 ## Secciones y campos
 
@@ -32,7 +35,7 @@ Todas las medidas de tamaño y posición son **píxeles lógicos a 96 DPI** (100
 | `height` | entero (`u32`) | `24..=400` | `40` | Alto de la isla en reposo |
 | `hover_width` | entero (`u32`) | `120..=1600` (`>= width`) | `480` | Ancho de la isla al pasar el mouse |
 | `hover_height` | entero (`u32`) | `24..=400` (`>= height`) | `64` | Alto de la isla al pasar el mouse |
-| `top_margin` | entero (`u32`) | `0..=200` | `8` | Separación respecto del borde superior de la pantalla |
+| `top_margin` | entero (`u32`) | `0..=200` | `8` | Separación respecto del borde superior de la pantalla (se ignora en `style = notch`) |
 
 ### `[appearance]`
 
@@ -42,7 +45,7 @@ Todas las medidas de tamaño y posición son **píxeles lógicos a 96 DPI** (100
 | `background` | color | `#RRGGBB` o `#RRGGBBAA` | `#000000` (según `theme`) | Color de fondo de la isla |
 | `text_color` | color | `#RRGGBB` o `#RRGGBBAA` | `#FFFFFF` (según `theme`) | Color del texto |
 | `opacity` | entero (`u8`) | `0..=100` | `100` (según `theme`) | Opacidad general de la isla (%) |
-| `corner_radius` | enum / entero | `auto` o `0..=200` | `auto` | Radio de esquina (`auto` = píldora `min(w, h) / 2`) |
+| `corner_radius` | enum / entero | `auto` o `0..=200` | `auto` | Radio de esquina (`auto` = píldora `min(w, h) / 2`; en `notch` aplica a las esquinas inferiores) |
 
 #### Presets de temas (`theme`)
 
@@ -56,7 +59,11 @@ Los valores explícitos válidos en `[appearance]` pisan siempre a los del prese
 
 ### `[behavior]`
 
-Reservada para el ítem 12 (retardo de aparición en hover, estilo isla o muesca, autoocultar). Hoy el parser acepta la sección vacía.
+| Clave | Tipo | Valores / Rango | Por defecto | Descripción |
+|---|---|---|---|---|
+| `hover_delay_ms` | entero (`u32`) | `0..=2000` | `0` | Tiempo en ms que el mouse debe permanecer encima antes de expandir. Si sale antes, no pasa nada. La salida siempre contrae sin retardo |
+| `animation_ms` | entero (`u32`) | `0..=1000` | `180` | Duración en ms de la animación de expandir y contraer (`0` = cambio instantáneo) |
+| `style` | enum | `island`, `notch` | `island` | `island`: isla flotante con `top_margin` y las 4 esquinas redondeadas. `notch`: muesca pegada al borde superior (`y = 0`), esquinas superiores rectas y esquinas inferiores redondeadas |
 
 ## Ejemplo canónico (`Config::default().to_text()`)
 
@@ -86,5 +93,10 @@ opacity = 100
 corner_radius = auto
 
 [behavior]
-# Reservado para opciones de comportamiento.
+# Tiempo que el mouse debe permanecer encima antes de expandir, en ms (0..2000).
+hover_delay_ms = 0
+# Duración de la animación de expandir y contraer, en ms (0..1000).
+animation_ms = 180
+# Estilo visual: "island" (flotante) o "notch" (muesca pegada al borde superior).
+style = island
 ```

@@ -27,7 +27,7 @@ docs/                  ARCHITECTURE.md, CONFIG.md, DEPENDENCIES.md, ROADMAP.md, 
 Planeado: `packages/atoll-ui` (mini toolkit de widgets) y `core/atoll-settings` (menú de configuración, ejecutable aparte).
 
 ## Estado
-Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio configurables), animación de hover con timer efímero, texto, reloj, escalado DPI por monitor, y archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo. Linux y macOS devuelven `Unsupported`.
+Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio por esquina configurables), animación de hover con timer efímero y retardo opcional (`hover_delay_ms`, `animation_ms`), estilo `island` o `notch` (muesca superior), texto, reloj, escalado DPI por monitor, y archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo. Linux y macOS devuelven `Unsupported`.
 Verificá el estado real leyendo `Cargo.toml` de cada crate, `docs/ROADMAP.md` y `docs/DEPENDENCIES.md`.
 
 ## Dependencias aprobadas
@@ -43,7 +43,7 @@ Cualquier otra está prohibida hasta que se apruebe.
 - Código de SO solo en `atoll-platform`. La lógica que no depende del SO (estado, animaciones) va en módulos portables, con tests que corran en Linux.
 - Errores con `Result` y tipos propios. `Box<dyn Error>` solo en `main`.
 - Comentarios y docs en español; identificadores en inglés.
-- Timers: solo tres permitidos. (a) El de animación, que existe únicamente mientras dura la animación. (b) Un timer de un solo disparo por minuto para el reloj, alineado al cambio de minuto. (c) Un timer de un solo disparo de 50 ms para el debounce al recargar `config.ini`. Nada de polling ni `sleep` en hilos. Única excepción a "sin hilos extra": el hilo observador de configuración, que vive bloqueado en `ReadDirectoryChangesW` (0% CPU en reposo). Cualquier otro necesita aprobación y se documenta en `docs/ARCHITECTURE.md`.
+- Timers: solo cuatro permitidos. (a) El de animación, que existe únicamente mientras dura la animación. (b) Un timer de un solo disparo por minuto para el reloj, alineado al cambio de minuto. (c) Un timer de un solo disparo de 50 ms para el debounce al recargar `config.ini`. (d) Un timer de un solo disparo de hasta 2000 ms para el retardo de hover (`hover_delay_ms > 0`), que se arma al entrar el mouse y se cancela (`KillTimer`) si el mouse sale antes de que venza; con `hover_delay_ms = 0` no se arma. En reposo no queda ningún timer activo. Nada de polling ni `sleep` en hilos. Única excepción a "sin hilos extra": el hilo observador de configuración, que vive bloqueado en `ReadDirectoryChangesW` (0% CPU en reposo). Cualquier otro necesita aprobación y se documenta en `docs/ARCHITECTURE.md`.
 - Se redibuja solo cuando algo cambió.
 
 ## Flujo de trabajo
@@ -63,8 +63,8 @@ Cualquier otra está prohibida hasta que se apruebe.
 No modifiques `LICENSE` ni `TRADEMARK.md`. No toques `.github/workflows/` salvo que la tarea lo pida. Nunca commitees `target/`, binarios ni videos.
 
 ## Backlog (fuente: `docs/ROADMAP.md`)
-11 Archivo de configuración y temas. 12 Comportamiento configurable. 13 Release v0.1. 14 `atoll-ui`. 15 IPC y host de plugins. 16 Idiomas es/en. 17 `atoll-settings`. 18 Plugin de música (Windows). 19 Backend de Linux. 20 Backend de macOS. 21 Dock (plugin, Windows).
-La v0.1 pública es: isla + reloj + DPI + configuración y temas + comportamiento, solo Windows.
+11 Archivo de configuración y temas. 12a Comportamiento configurable (hover delay, duración, estilo isla/notch). 13 Release v0.1. 12b Autoocultar (v0.2). 14 `atoll-ui`. 15 IPC y host de plugins. 16 Idiomas es/en. 17 `atoll-settings`. 18 Plugin de música (Windows). 19 Backend de Linux. 20 Backend de macOS. 21 Dock (plugin, Windows).
+La v0.1 pública es: isla + reloj + DPI + configuración y temas + comportamiento (12a), solo Windows.
 
 ## Cómo hablarme
 Español rioplatense, directo. Una sola recomendación, no menús de opciones. Archivos completos, no parches. Si algo es ambiguo, preguntá UNA vez antes de escribir código.

@@ -6,14 +6,18 @@
 //! con `UpdateLayeredWindow` y el sistema la mantiene en pantalla sin que Atoll
 //! haga nada más.
 //!
-//! Timers permitidos (solo tres):
+//! Timers permitidos (solo cuatro):
 //! 1. **Animación (`ANIMATION_TIMER`):** solo existe mientras la isla se está
-//!    moviendo (≈180 ms) y se apaga apenas termina.
+//!    moviendo (`animation_ms`) y se apaga apenas termina. Con `animation_ms = 0`
+//!    ni siquiera se arma.
 //! 2. **Reloj (`CLOCK_TIMER`):** un solo disparo por minuto, alineado al próximo
 //!    cambio de minuto (`SetCoalescableTimer` sin coalescencia). Se re-sincroniza
 //!    ante `WM_TIMECHANGE` y al volver de suspensión (`WM_POWERBROADCAST`).
 //! 3. **Debounce de configuración (`RELOAD_TIMER`):** un solo disparo de 50 ms
 //!    cuando el hilo observador avisa (`WM_APP + 1`) que cambió `config.ini`.
+//! 4. **Retardo de hover (`HOVER_DELAY_TIMER`):** un solo disparo de hasta 2000 ms
+//!    al entrar el mouse cuando `hover_delay_ms > 0`; se cancela (`KillTimer`) si
+//!    el mouse sale antes de que venza. Con `hover_delay_ms = 0` no se arma.
 //!
 //! Recarga en vivo: un hilo auxiliar con pila reducida (64 KB) queda bloqueado en
 //! `ReadDirectoryChangesW` sobre la carpeta de configuración (cero polling, cero
@@ -62,7 +66,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::animation::Animator;
+use crate::animation::{Animator, HoverAction};
 use crate::clock::{local_time, LocalTime};
 use crate::dpi::{scale_for_dpi, scale_px, scale_size};
 use crate::{Backend, IslandConfig, Painter, PlatformError};
@@ -91,6 +95,9 @@ const CLOCK_TIMER: usize = 2;
 /// Identificador del timer de debounce para recargar la configuración (un solo disparo).
 const RELOAD_TIMER: usize = 3;
 
+/// Identificador del timer de retardo antes de expandir por hover (un solo disparo).
+const HOVER_DELAY_TIMER: usize = 4;
+
 /// Margen que se suma a la espera del reloj, en milisegundos.
 ///
 /// Evita que el timer salte unos milisegundos antes del cambio de minuto y haya
@@ -109,18 +116,17 @@ const WATCHER_STACK_BYTES: usize = 64 * 1024;
 /// Milisegundos entre cuadros de la animación (≈ 60 cuadros por segundo).
 const FRAME_INTERVAL_MS: u32 = 16;
 
-/// Duración de la animación de expandir y contraer.
-const ANIMATION_DURATION: Duration = Duration::from_millis(180);
-
 /// Bandera para que el hilo observador deje de publicar mensajes al cerrarse la ventana.
 static WINDOW_CLOSED: AtomicBool = AtomicBool::new(false);
 
-/// Medidas lógicas (`Copy`) de la isla, guardadas en `thread_local!` con `Cell`.
+/// Medidas lógicas y parámetros de comportamiento (`Copy`) de la isla, guardados en `thread_local!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LogicalMetrics {
     size: Size,
     hover_size: Size,
     top_margin: u32,
+    hover_delay_ms: u32,
+    animation_ms: u32,
 }
 
 impl From<&IslandConfig> for LogicalMetrics {
@@ -129,6 +135,8 @@ impl From<&IslandConfig> for LogicalMetrics {
             size: config.size,
             hover_size: config.hover_size,
             top_margin: config.top_margin,
+            hover_delay_ms: config.hover_delay_ms,
+            animation_ms: config.animation_ms,
         }
     }
 }
@@ -137,7 +145,7 @@ thread_local! {
     /// Estado de la animación. El loop de mensajes corre en un solo hilo, así
     /// que alcanza con un `Cell` (y evita pánicos por reentrada del `RefCell`).
     static ANIMATOR: Cell<Option<Animator>> = const { Cell::new(None) };
-    /// Margen superior de la isla, en píxeles físicos (ya escalado).
+    /// Margen superior de la isla, en píxeles físicos (ya escalado; `0` en modo `notch`).
     static TOP_MARGIN: Cell<i32> = const { Cell::new(0) };
     /// Medidas lógicas actuales de la isla, para recalcular tamaños cuando cambia el DPI o la config.
     static CONFIG: Cell<Option<LogicalMetrics>> = const { Cell::new(None) };
@@ -587,23 +595,22 @@ unsafe fn present_frame(
     result
 }
 
-/// El mouse entró o salió de la isla: arranca la animación si el estado cambió.
+/// El mouse entró o se movió dentro de la isla.
 ///
 /// # Safety
 ///
 /// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
-unsafe fn on_hover(hwnd: HWND, hovering: bool) {
+unsafe fn on_mouse_move(hwnd: HWND) {
     let Some(mut animator) = ANIMATOR.get() else {
         return;
     };
-    let changed = animator.set_hover(hovering, Instant::now());
+    let was_inside = animator.is_pointer_inside();
+    let action = animator.on_mouse_enter(Instant::now());
     ANIMATOR.set(Some(animator));
-    if !changed {
-        return;
-    }
 
-    if hovering {
-        // Pide el aviso `WM_MOUSELEAVE` para saber cuándo sale el mouse.
+    if !was_inside {
+        // Pide el aviso `WM_MOUSELEAVE` para saber cuándo sale el mouse, incluso si
+        // estamos esperando que venza el timer del retardo (`HOVER_DELAY_TIMER`).
         let mut request = TRACKMOUSEEVENT {
             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
             dwFlags: TME_LEAVE,
@@ -613,8 +620,77 @@ unsafe fn on_hover(hwnd: HWND, hovering: bool) {
         // SAFETY: `request` está completo y `hwnd` es válido.
         unsafe { TrackMouseEvent(&mut request) };
     }
-    // SAFETY: `hwnd` es válido; el timer se apaga solo al terminar la animación.
-    unsafe { SetTimer(hwnd, ANIMATION_TIMER, FRAME_INTERVAL_MS, None) };
+
+    // SAFETY: `hwnd` es válido.
+    unsafe { execute_hover_action(hwnd, action) };
+}
+
+/// El mouse salió de la isla: cancela el retardo pendiente o contrae sin retardo.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_mouse_leave(hwnd: HWND) {
+    let Some(mut animator) = ANIMATOR.get() else {
+        return;
+    };
+    let action = animator.on_mouse_leave(Instant::now());
+    ANIMATOR.set(Some(animator));
+
+    // SAFETY: `hwnd` es válido.
+    unsafe { execute_hover_action(hwnd, action) };
+}
+
+/// Venció el timer de un solo disparo del retardo de hover (`HOVER_DELAY_TIMER`).
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_delay_timer(hwnd: HWND) {
+    // Es de un solo disparo: se apaga inmediatamente al disparar.
+    // SAFETY: `hwnd` es válido.
+    unsafe { KillTimer(hwnd, HOVER_DELAY_TIMER) };
+
+    let Some(mut animator) = ANIMATOR.get() else {
+        return;
+    };
+    let action = animator.on_delay_elapsed(Instant::now());
+    ANIMATOR.set(Some(animator));
+
+    // SAFETY: `hwnd` es válido.
+    unsafe { execute_hover_action(hwnd, action) };
+}
+
+/// Ejecuta en Win32 la acción pura devuelta por la máquina de estados del `Animator`.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn execute_hover_action(hwnd: HWND, action: HoverAction) {
+    match action {
+        HoverAction::None => {}
+        HoverAction::ArmDelayTimer { delay_ms } => {
+            // SAFETY: `hwnd` es válido; se apaga al vencer o si el mouse sale antes.
+            unsafe { SetTimer(hwnd, HOVER_DELAY_TIMER, delay_ms, None) };
+        }
+        HoverAction::CancelDelayTimer => {
+            // SAFETY: `hwnd` es válido.
+            unsafe { KillTimer(hwnd, HOVER_DELAY_TIMER) };
+        }
+        HoverAction::StartExpand | HoverAction::StartCollapse => {
+            // SAFETY: `hwnd` es válido; nos aseguramos de que no quede un retardo colgado.
+            unsafe { KillTimer(hwnd, HOVER_DELAY_TIMER) };
+            let instant = ANIMATOR.get().is_some_and(|a| a.duration().is_zero());
+            if instant {
+                // Con `animation_ms = 0`, el cambio es instantáneo y no se arma timer.
+                // SAFETY: `hwnd` es válido.
+                unsafe { on_timer(hwnd) };
+            } else {
+                // SAFETY: `hwnd` es válido; el timer se apaga solo al terminar la animación.
+                unsafe { SetTimer(hwnd, ANIMATION_TIMER, FRAME_INTERVAL_MS, None) };
+            }
+        }
+    }
 }
 
 /// Un tick del timer: dibuja el cuadro siguiente y apaga el timer al terminar.
@@ -712,18 +788,21 @@ unsafe fn on_clock(hwnd: HWND) {
 }
 
 /// Aplica un factor de escala y las medidas lógicas: guarda el factor, escala el
-/// margen y reconfigura los tamaños físicos del animador conservando el hover.
+/// margen y reconfigura los tamaños físicos y tiempos del animador conservando el hover.
 fn apply_scale(metrics: LogicalMetrics, scale: f32) {
     SCALE.set(scale);
     TOP_MARGIN.set(to_i32(scale_px(metrics.top_margin, scale)));
     let collapsed = scale_size(metrics.size, scale);
     let expanded = scale_size(metrics.hover_size, scale);
+    let duration = Duration::from_millis(u64::from(metrics.animation_ms));
     let animator = match ANIMATOR.get() {
         Some(mut animator) => {
+            animator.set_timing(metrics.hover_delay_ms, duration);
             animator.reconfigure(collapsed, expanded);
             animator
         }
-        None => Animator::new(collapsed, expanded, ANIMATION_DURATION, Instant::now()),
+        None => Animator::new(collapsed, expanded, duration, Instant::now())
+            .with_timing(metrics.hover_delay_ms, duration),
     };
     ANIMATOR.set(Some(animator));
 }
@@ -739,9 +818,12 @@ unsafe fn on_dpi_changed(hwnd: HWND, dpi: u32) {
         return;
     };
     apply_scale(metrics, scale_for_dpi(dpi));
-    // El cambio de tamaño es instantáneo: si había una animación en curso, ya no hace falta.
+    // El cambio de tamaño es instantáneo: si había una animación o retardo en curso, se apagan.
     // SAFETY: `hwnd` es válido.
-    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+    unsafe {
+        KillTimer(hwnd, ANIMATION_TIMER);
+        KillTimer(hwnd, HOVER_DELAY_TIMER);
+    }
     if let Some(animator) = ANIMATOR.get() {
         draw_step(hwnd, animator.size());
     }
@@ -776,7 +858,10 @@ unsafe fn on_reload_timer(hwnd: HWND) {
     CONFIG.set(Some(metrics));
     apply_scale(metrics, SCALE.get());
     // SAFETY: `hwnd` es válido.
-    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+    unsafe {
+        KillTimer(hwnd, ANIMATION_TIMER);
+        KillTimer(hwnd, HOVER_DELAY_TIMER);
+    }
     if let Some(animator) = ANIMATOR.get() {
         draw_step(hwnd, animator.size());
     }
@@ -792,12 +877,12 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_MOUSEMOVE => {
             // SAFETY: Windows invoca este procedimiento con un `hwnd` válido.
-            unsafe { on_hover(hwnd, true) };
+            unsafe { on_mouse_move(hwnd) };
             0
         }
         WM_MOUSELEAVE => {
             // SAFETY: ídem.
-            unsafe { on_hover(hwnd, false) };
+            unsafe { on_mouse_leave(hwnd) };
             0
         }
         WM_TIMER if wparam == ANIMATION_TIMER => {
@@ -813,6 +898,11 @@ unsafe extern "system" fn window_proc(
         WM_TIMER if wparam == RELOAD_TIMER => {
             // SAFETY: ídem.
             unsafe { on_reload_timer(hwnd) };
+            0
+        }
+        WM_TIMER if wparam == HOVER_DELAY_TIMER => {
+            // SAFETY: ídem.
+            unsafe { on_delay_timer(hwnd) };
             0
         }
         WM_CONFIG_CHANGED => {
@@ -862,6 +952,7 @@ unsafe extern "system" fn window_proc(
                 KillTimer(hwnd, ANIMATION_TIMER);
                 KillTimer(hwnd, CLOCK_TIMER);
                 KillTimer(hwnd, RELOAD_TIMER);
+                KillTimer(hwnd, HOVER_DELAY_TIMER);
                 PostQuitMessage(0);
             }
             0

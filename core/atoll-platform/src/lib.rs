@@ -18,6 +18,9 @@ pub mod dpi;
 #[cfg(windows)]
 mod windows;
 
+/// Duración por defecto de la animación de expandir y contraer, en milisegundos.
+pub const DEFAULT_ANIMATION_MS: u32 = 180;
+
 /// Sistema operativo sobre el que corre Atoll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -49,31 +52,46 @@ impl Os {
 
 /// Configuración de la ventana de la isla.
 ///
-/// Todas las medidas son **lógicas**: píxeles a 96 DPI (100 % de escala). El
-/// backend las multiplica por el factor de escala del monitor (ver [`dpi`]).
+/// Todas las medidas de tamaño y margen son **lógicas**: píxeles a 96 DPI (100 %
+/// de escala). El backend las multiplica por el factor de escala del monitor
+/// (ver [`dpi`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IslandConfig {
     /// Tamaño lógico de la isla en reposo.
     pub size: Size,
     /// Tamaño lógico de la isla cuando el mouse está encima.
     pub hover_size: Size,
-    /// Separación lógica entre el borde superior de la pantalla y la isla.
+    /// Separación lógica entre el borde superior de la pantalla y la isla (`0` en modo `notch`).
     pub top_margin: u32,
+    /// Milisegundos que el mouse debe permanecer encima antes de empezar a expandir (`0` = inmediato).
+    pub hover_delay_ms: u32,
+    /// Duración de la animación de expandir y contraer, en milisegundos (`0` = instantáneo).
+    pub animation_ms: u32,
     /// Carpeta donde vive `config.ini`, para observar cambios y recargar en vivo.
     pub config_dir: Option<PathBuf>,
 }
 
 impl IslandConfig {
     /// Crea una configuración a partir de los dos tamaños y el margen superior,
-    /// sin carpeta de recarga en vivo.
+    /// sin retardo de hover (`0` ms), con animación de `180` ms y sin carpeta de recarga en vivo.
     #[must_use]
     pub const fn new(size: Size, hover_size: Size, top_margin: u32) -> Self {
         Self {
             size,
             hover_size,
             top_margin,
+            hover_delay_ms: 0,
+            animation_ms: DEFAULT_ANIMATION_MS,
             config_dir: None,
         }
+    }
+
+    /// Configura el retardo de hover (`hover_delay_ms`) y la duración de la animación (`animation_ms`).
+    #[must_use]
+    pub const fn with_behavior(mut self, hover_delay_ms: u32, animation_ms: u32) -> Self {
+        self.hover_delay_ms = hover_delay_ms;
+        self.animation_ms = animation_ms;
+        self
     }
 
     /// Asocia la carpeta de configuración para habilitar la recarga en vivo.
@@ -200,10 +218,13 @@ mod tests {
     #[test]
     fn config_keeps_values() {
         let config = IslandConfig::new(Size::new(400, 40), Size::new(480, 64), 8)
+            .with_behavior(400, 250)
             .with_config_dir(PathBuf::from("Atoll"));
         assert_eq!(config.size, Size::new(400, 40));
         assert_eq!(config.hover_size, Size::new(480, 64));
         assert_eq!(config.top_margin, 8);
+        assert_eq!(config.hover_delay_ms, 400);
+        assert_eq!(config.animation_ms, 250);
         assert_eq!(config.config_dir, Some(PathBuf::from("Atoll")));
     }
 

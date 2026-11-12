@@ -33,6 +33,46 @@ impl Size {
     }
 }
 
+/// Radios de las cuatro esquinas de la isla, en píxeles físicos.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CornerRadii {
+    /// Radio de la esquina superior izquierda.
+    pub top_left: f32,
+    /// Radio de la esquina superior derecha.
+    pub top_right: f32,
+    /// Radio de la esquina inferior derecha.
+    pub bottom_right: f32,
+    /// Radio de la esquina inferior izquierda.
+    pub bottom_left: f32,
+}
+
+impl CornerRadii {
+    /// Las cuatro esquinas rectas (`0.0`).
+    pub const ZERO: Self = Self::uniform(0.0);
+
+    /// Asigna el mismo radio `radius` a las cuatro esquinas (estilo `island`).
+    #[must_use]
+    pub const fn uniform(radius: f32) -> Self {
+        Self {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        }
+    }
+
+    /// Esquinas superiores rectas (`0.0`) y esquinas inferiores con radio `radius` (estilo `notch`).
+    #[must_use]
+    pub const fn bottom_only(radius: f32) -> Self {
+        Self {
+            top_left: 0.0,
+            top_right: 0.0,
+            bottom_right: radius,
+            bottom_left: radius,
+        }
+    }
+}
+
 /// Errores del render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderError {
@@ -102,11 +142,10 @@ pub fn render_island(size: Size) -> Result<Frame, RenderError> {
     render_island_with(size, Color::BLACK, None)
 }
 
-/// Dibuja la isla con el color de fondo (incluyendo su alfa) y el radio de esquina dados.
+/// Dibuja la isla con el color de fondo (incluyendo su alfa) y el radio uniforme dado.
 ///
 /// Si `corner_radius` es `None`, usa forma de píldora (`min(ancho, alto) / 2`).
 /// Si es `Some(r)`, el radio en píxeles físicos se acota a `0.0..=(min(ancho, alto) / 2)`.
-/// El [`Frame`] devuelto tiene alfa premultiplicado listo para entregar al SO.
 ///
 /// # Errors
 ///
@@ -117,19 +156,30 @@ pub fn render_island_with(
     color: Color,
     corner_radius: Option<f32>,
 ) -> Result<Frame, RenderError> {
+    let max_radius = (size.width.min(size.height) as f32) / 2.0;
+    let r = corner_radius.unwrap_or(max_radius);
+    render_island_styled(size, color, CornerRadii::uniform(r))
+}
+
+/// Dibuja la isla o muesca con el color de fondo y los radios por esquina dados.
+///
+/// Cada esquina de `radii` se acota a `0.0..=(min(ancho, alto) / 2)`. El [`Frame`]
+/// resultante tiene alfa premultiplicado listo para entregar al SO.
+///
+/// # Errors
+///
+/// Devuelve [`RenderError::InvalidSize`] si el ancho o el alto son cero, o
+/// [`RenderError::InvalidShape`] si no se puede construir la forma.
+pub fn render_island_styled(
+    size: Size,
+    color: Color,
+    radii: CornerRadii,
+) -> Result<Frame, RenderError> {
     let mut pixmap = Pixmap::new(size.width, size.height).ok_or(RenderError::InvalidSize(size))?;
 
     let width = size.width as f32;
     let height = size.height as f32;
-    let max_radius = width.min(height) / 2.0;
-    let radius = corner_radius.map_or(max_radius, |r| {
-        if r.is_finite() {
-            r.clamp(0.0, max_radius)
-        } else {
-            max_radius
-        }
-    });
-    let path = rounded_rect(width, height, radius).ok_or(RenderError::InvalidShape)?;
+    let path = rounded_rect(width, height, radii).ok_or(RenderError::InvalidShape)?;
 
     if color.a > 0 {
         let mut paint = Paint::default();
@@ -151,52 +201,69 @@ pub fn render_island_with(
     })
 }
 
-/// Rectángulo con esquinas redondeadas; con `radius = min(w, h) / 2` es una píldora.
-fn rounded_rect(width: f32, height: f32, radius: f32) -> Option<Path> {
-    let mut builder = PathBuilder::new();
-    if radius <= 0.0 {
-        builder.move_to(0.0, 0.0);
-        builder.line_to(width, 0.0);
-        builder.line_to(width, height);
-        builder.line_to(0.0, height);
-        builder.close();
-        return builder.finish();
+/// Acota un radio de esquina a `0.0..=max_radius`.
+fn clamp_radius(r: f32, max_radius: f32) -> f32 {
+    if r.is_finite() {
+        r.clamp(0.0, max_radius)
+    } else {
+        max_radius
     }
+}
 
+/// Rectángulo con radio independiente en cada esquina.
+fn rounded_rect(width: f32, height: f32, radii: CornerRadii) -> Option<Path> {
     /// Constante para aproximar un cuarto de círculo con una curva cúbica.
     const KAPPA: f32 = 0.552_284_7;
-    let k = radius * KAPPA;
 
-    builder.move_to(radius, 0.0);
-    builder.line_to(width - radius, 0.0);
-    builder.cubic_to(width - radius + k, 0.0, width, radius - k, width, radius);
-    builder.line_to(width, height - radius);
-    builder.cubic_to(
-        width,
-        height - radius + k,
-        width - radius + k,
-        height,
-        width - radius,
-        height,
-    );
-    builder.line_to(radius, height);
-    builder.cubic_to(
-        radius - k,
-        height,
-        0.0,
-        height - radius + k,
-        0.0,
-        height - radius,
-    );
-    builder.line_to(0.0, radius);
-    builder.cubic_to(0.0, radius - k, radius - k, 0.0, radius, 0.0);
+    let max_radius = width.min(height) / 2.0;
+    let tl = clamp_radius(radii.top_left, max_radius);
+    let tr = clamp_radius(radii.top_right, max_radius);
+    let br = clamp_radius(radii.bottom_right, max_radius);
+    let bl = clamp_radius(radii.bottom_left, max_radius);
+
+    let mut builder = PathBuilder::new();
+    builder.move_to(tl, 0.0);
+    builder.line_to(width - tr, 0.0);
+    if tr > 0.0 {
+        let k = tr * KAPPA;
+        builder.cubic_to(width - tr + k, 0.0, width, tr - k, width, tr);
+    }
+
+    builder.line_to(width, height - br);
+    if br > 0.0 {
+        let k = br * KAPPA;
+        builder.cubic_to(
+            width,
+            height - br + k,
+            width - br + k,
+            height,
+            width - br,
+            height,
+        );
+    }
+
+    builder.line_to(bl, height);
+    if bl > 0.0 {
+        let k = bl * KAPPA;
+        builder.cubic_to(bl - k, height, 0.0, height - bl + k, 0.0, height - bl);
+    }
+
+    builder.line_to(0.0, tl);
+    if tl > 0.0 {
+        let k = tl * KAPPA;
+        builder.cubic_to(0.0, tl - k, tl - k, 0.0, tl, 0.0);
+    }
+
     builder.close();
     builder.finish()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{render_island, render_island_with, Color, Frame, RenderError, Size};
+    use super::{
+        render_island, render_island_styled, render_island_with, Color, CornerRadii, Frame,
+        RenderError, Size,
+    };
 
     /// Píxel RGBA premultiplicado en (x, y).
     fn pixel(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
@@ -279,6 +346,33 @@ mod tests {
             255,
             "con radio 10 el punto (8,8) ya está adentro"
         );
+    }
+
+    #[test]
+    fn notch_style_has_opaque_top_corners_and_rounded_transparent_bottom_corners() {
+        let frame = render_island_styled(
+            Size::new(400, 40),
+            Color::BLACK,
+            CornerRadii::bottom_only(20.0),
+        )
+        .expect("notch válido");
+
+        // Esquinas superiores rectas: opacas.
+        assert_eq!(alpha(&frame, 0, 0), 255, "esquina superior izquierda opaca");
+        assert_eq!(alpha(&frame, 399, 0), 255, "esquina superior derecha opaca");
+
+        // Esquinas inferiores redondeadas: transparentes en el extremo y opacas adentro.
+        assert_eq!(
+            alpha(&frame, 0, 39),
+            0,
+            "esquina inferior izquierda transparente"
+        );
+        assert_eq!(
+            alpha(&frame, 399, 39),
+            0,
+            "esquina inferior derecha transparente"
+        );
+        assert_eq!(alpha(&frame, 200, 20), 255, "centro opaco");
     }
 
     #[test]
