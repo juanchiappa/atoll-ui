@@ -24,3 +24,4 @@ Primera versión pública de Atoll (solo Windows x64).
   - `style` (`island` | `notch`): modo isla flotante con las cuatro esquinas redondeadas o modo muesca (`notch`) pegado al borde superior (`y = 0`) con esquinas superiores rectas e inferiores redondeadas.
 
 [0.1.0]: https://github.com/juanchiappa/atoll-ui/releases/tag/v0.1.0
+

@@ -78,3 +78,4 @@ Una vez verificado el artifact de prueba:
    ```
    - **Criterio de aceptación:** `RAM_MB < 20` y el valor de `CPU` (segundos acumulados de procesador) idéntico entre ambas muestras (`0,00` de diferencia en 30 segundos = 0 % de CPU en reposo).
 5. Cerrá la isla haciendo clic derecho sobre ella.
+
