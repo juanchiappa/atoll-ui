@@ -1,0 +1,317 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Empaquetar Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verificar versión contra Cargo.toml
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $cargoToml = Get-Content -Path "Cargo.toml" -Raw -Encoding UTF8
+          if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
+              Write-Error "No se pudo leer [workspace.package].version en Cargo.toml."
+              exit 1
+          }
+          $cargoVersion = $Matches[1]
+
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+              $tagName = $env:GITHUB_REF_NAME
+              if ($tagName -notmatch '^v(\d+\.\d+\.\d+)$') {
+                  Write-Error "El tag '$tagName' no tiene el formato esperado vX.Y.Z."
+                  exit 1
+              }
+              $tagVersion = $Matches[1]
+              if ($tagVersion -ne $cargoVersion) {
+                  Write-Error "La versión del tag ($tagName) no coincide con la versión de Cargo.toml (v$cargoVersion)."
+                  exit 1
+              }
+              $version = $tagVersion
+          } else {
+              $version = $cargoVersion
+          }
+
+          Write-Host "Versión verificada: v$version"
+          "ATOLL_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding UTF8 -Append
+
+      - name: Extraer notas de la versión desde CHANGELOG.md
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:ATOLL_VERSION
+          if (-not (Test-Path -Path "CHANGELOG.md")) {
+              Write-Error "No existe CHANGELOG.md en la raíz del repositorio."
+              exit 1
+          }
+
+          $lines = Get-Content -Path "CHANGELOG.md" -Encoding UTF8
+          $escaped = [regex]::Escape($version)
+          $headerPattern = "^## \[v?$escaped\](\s*-\s*\S+.*)?\s*$"
+          $inSection = $false
+          $captured = New-Object System.Collections.Generic.List[string]
+
+          foreach ($line in $lines) {
+              if (-not $inSection) {
+                  if ($line -match $headerPattern) {
+                      $inSection = $true
+                  }
+              } else {
+                  if ($line -match "^## \[" -or $line -match "^\[[^\]]+\]:\s*\S+") {
+                      break
+                  }
+                  $captured.Add($line)
+              }
+          }
+
+          $notes = ($captured -join "`n").Trim()
+          if (-not $inSection -or [string]::IsNullOrWhiteSpace($notes)) {
+              Write-Error "No se encontró una sección con contenido para la versión $version en CHANGELOG.md."
+              exit 1
+          }
+
+          Set-Content -Path "release-notes.md" -Value ($notes + "`n") -Encoding UTF8 -NoNewline
+          Write-Host "Notas extraídas para v${version}:"
+          Write-Host $notes
+
+      - name: Compilar binario de release
+        run: cargo build --release --locked -p atoll-core
+
+      - name: Armar paquete zip y calcular SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:ATOLL_VERSION
+          $pkgName = "atoll-v$version-windows-x64"
+          $distDir = Join-Path "dist" $pkgName
+          $zipName = "$pkgName.zip"
+          $shaName = "$zipName.sha256"
+
+          if (Test-Path "dist") {
+              Remove-Item -Path "dist" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+
+          Copy-Item -Path "target/release/atoll.exe" -Destination (Join-Path $distDir "atoll.exe")
+          Copy-Item -Path "LICENSE" -Destination (Join-Path $distDir "LICENSE")
+          Copy-Item -Path "THIRD_PARTY_NOTICES.md" -Destination (Join-Path $distDir "THIRD_PARTY_NOTICES.md")
+
+          $leeme = @(
+              "Atoll v$version (Windows x64)"
+              "============================="
+              ""
+              "Cómo ejecutar:"
+              "  Hacé doble clic en atoll.exe (no requiere instalador)."
+              ""
+              "Cómo cerrar la isla:"
+              "  Hacé clic derecho directamente sobre la isla."
+              ""
+              "Configuración y temas:"
+              "  Al abrirse por primera vez, Atoll crea su archivo de configuración en:"
+              "  %APPDATA%\Atoll\config.ini"
+              "  Podés editar ese archivo con cualquier editor de texto: los cambios se"
+              "  aplican en vivo apenas guardás, sin reiniciar la aplicación."
+              ""
+              "Aviso de Windows SmartScreen:"
+              "  Como el ejecutable todavía no cuenta con firma digital, Windows Defender"
+              "  SmartScreen puede mostrar el cartel 'Windows protegió su PC' la primera"
+              "  vez que lo abras. Para ejecutarlo, hacé clic en 'Más información' y"
+              "  luego en 'Ejecutar de todas formas'."
+              ""
+          ) -join "`r`n"
+          Set-Content -Path (Join-Path $distDir "LEEME.txt") -Value $leeme -Encoding UTF8 -NoNewline
+
+          if (Test-Path $zipName) {
+              Remove-Item -Path $zipName -Force
+          }
+          Compress-Archive -Path "$distDir\*" -DestinationPath $zipName -Force
+
+          $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path $shaName -Value "$hash  $zipName`n" -Encoding ASCII -NoNewline
+
+          Write-Host "Paquete generado: $zipName"
+          Write-Host "SHA256: $hash"
+
+      - name: Subir artifact de distribución
+        uses: actions/upload-artifact@v4
+        with:
+          name: atoll-v${{ env.ATOLL_VERSION }}-windows-x64
+          path: |
+            atoll-v${{ env.ATOLL_VERSION }}-windows-x64.zip
+            atoll-v${{ env.ATOLL_VERSION }}-windows-x64.zip.sha256
+            release-notes.md
+          if-no-files-found: error
+
+  publish:
+    name: Publicar Release en GitHub
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verificar versión del tag contra Cargo.toml
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $cargoToml = Get-Content -Path "Cargo.toml" -Raw -Encoding UTF8
+          if ($cargoToml -notmatch '(?ms)^\[workspace\.package\].*?^\s*version\s*=\s*"([^"]+)"') {
+              Write-Error "No se pudo leer [workspace.package].version en Cargo.toml."
+              exit 1
+          }
+          $cargoVersion = $Matches[1]
+          $tagName = $env:GITHUB_REF_NAME
+          if ($tagName -notmatch '^v(\d+\.\d+\.\d+)$') {
+              Write-Error "El tag '$tagName' no tiene el formato esperado vX.Y.Z."
+              exit 1
+          }
+          $tagVersion = $Matches[1]
+          if ($tagVersion -ne $cargoVersion) {
+              Write-Error "La versión del tag ($tagName) no coincide con la versión de Cargo.toml (v$cargoVersion)."
+              exit 1
+          }
+          "ATOLL_VERSION=$tagVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding UTF8 -Append
+
+      - name: Extraer notas de la versión desde CHANGELOG.md
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:ATOLL_VERSION
+          $lines = Get-Content -Path "CHANGELOG.md" -Encoding UTF8
+          $escaped = [regex]::Escape($version)
+          $headerPattern = "^## \[v?$escaped\](\s*-\s*\S+.*)?\s*$"
+          $inSection = $false
+          $captured = New-Object System.Collections.Generic.List[string]
+
+          foreach ($line in $lines) {
+              if (-not $inSection) {
+                  if ($line -match $headerPattern) {
+                      $inSection = $true
+                  }
+              } else {
+                  if ($line -match "^## \[" -or $line -match "^\[[^\]]+\]:\s*\S+") {
+                      break
+                  }
+                  $captured.Add($line)
+              }
+          }
+
+          $notes = ($captured -join "`n").Trim()
+          if (-not $inSection -or [string]::IsNullOrWhiteSpace($notes)) {
+              Write-Error "No se encontró una sección con contenido para la versión $version en CHANGELOG.md."
+              exit 1
+          }
+
+          Set-Content -Path "release-notes.md" -Value ($notes + "`n") -Encoding UTF8 -NoNewline
+
+      - name: Compilar binario de release
+        run: cargo build --release --locked -p atoll-core
+
+      - name: Armar paquete zip y calcular SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:ATOLL_VERSION
+          $pkgName = "atoll-v$version-windows-x64"
+          $distDir = Join-Path "dist" $pkgName
+          $zipName = "$pkgName.zip"
+          $shaName = "$zipName.sha256"
+
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+          Copy-Item -Path "target/release/atoll.exe" -Destination (Join-Path $distDir "atoll.exe")
+          Copy-Item -Path "LICENSE" -Destination (Join-Path $distDir "LICENSE")
+          Copy-Item -Path "THIRD_PARTY_NOTICES.md" -Destination (Join-Path $distDir "THIRD_PARTY_NOTICES.md")
+
+          $leeme = @(
+              "Atoll v$version (Windows x64)"
+              "============================="
+              ""
+              "Cómo ejecutar:"
+              "  Hacé doble clic en atoll.exe (no requiere instalador)."
+              ""
+              "Cómo cerrar la isla:"
+              "  Hacé clic derecho directamente sobre la isla."
+              ""
+              "Configuración y temas:"
+              "  Al abrirse por primera vez, Atoll crea su archivo de configuración en:"
+              "  %APPDATA%\Atoll\config.ini"
+              "  Podés editar ese archivo con cualquier editor de texto: los cambios se"
+              "  aplican en vivo apenas guardás, sin reiniciar la aplicación."
+              ""
+              "Aviso de Windows SmartScreen:"
+              "  Como el ejecutable todavía no cuenta con firma digital, Windows Defender"
+              "  SmartScreen puede mostrar el cartel 'Windows protegió su PC' la primera"
+              "  vez que lo abras. Para ejecutarlo, hacé clic en 'Más información' y"
+              "  luego en 'Ejecutar de todas formas'."
+              ""
+          ) -join "`r`n"
+          Set-Content -Path (Join-Path $distDir "LEEME.txt") -Value $leeme -Encoding UTF8 -NoNewline
+
+          Compress-Archive -Path "$distDir\*" -DestinationPath $zipName -Force
+          $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path $shaName -Value "$hash  $zipName`n" -Encoding ASCII -NoNewline
+
+      - name: Publicar Release con GitHub CLI
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $version = $env:ATOLL_VERSION
+          $tag = "v$version"
+          $zipName = "atoll-v$version-windows-x64.zip"
+          $shaName = "$zipName.sha256"
+
+          $ErrorActionPreference = "Continue"
+          gh release view $tag --repo $env:GITHUB_REPOSITORY > $null 2>&1
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+
+          if ($exists) {
+              Write-Error "Ya existe un Release publicado para el tag $tag. Se aborta para no sobrescribirlo."
+              exit 1
+          }
+
+          gh release create $tag `
+              $zipName `
+              $shaName `
+              --repo $env:GITHUB_REPOSITORY `
+              --verify-tag `
+              --title "Atoll $tag" `
+              --notes-file "release-notes.md"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Falló gh release create para el tag $tag."
+              exit $LASTEXITCODE
+          }

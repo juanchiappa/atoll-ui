@@ -38,8 +38,8 @@ Referencia: Hecho / En revisión / Pendiente.
 | 9 | Reloj en la isla (#6) | Hecho |
 | 10 | Escalado DPI por monitor (#7) | Hecho |
 | 11 | Archivo de configuración y temas (colores, tamaños, radio, opacidad, margen) (#11, #12) | Hecho |
-| 12a | Comportamiento configurable (`hover_delay_ms`, `animation_ms`, `style = island \| notch`) | Hecho |
-| 13 | Release v0.1: workflow de release con ejecutable de Windows y README con la medición | Pendiente |
+| 12a | Comportamiento configurable (`hover_delay_ms`, `animation_ms`, `style = island \| notch`) (#13) | Hecho |
+| 13 | Release v0.1: workflow de release con ejecutable de Windows y README | Hecho |
 | 12b | Autoocultar (v0.2) | Pendiente |
 | 14 | `atoll-ui`, mini toolkit de widgets | Pendiente |
 | 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
@@ -116,13 +116,15 @@ Referencia: Hecho / En revisión / Pendiente.
   - `style` (`island | notch`, por defecto `island`): en `notch` la ventana se ubica en `y = 0` ignorando
     `top_margin`, con esquinas superiores rectas y esquinas inferiores redondeadas (`CornerRadii`).
 
+### 13. Release v0.1 (hecho)
+
+- Workflow `.github/workflows/release.yml` para `windows-latest` con disparo por tag `v*.*.*` y corrida manual
+  `workflow_dispatch` (solo artifact), verificando versión contra `Cargo.toml`, extrayendo notas desde `CHANGELOG.md`,
+  empaquetando `atoll-vX.Y.Z-windows-x64.zip` (`atoll.exe`, `LICENSE`, `THIRD_PARTY_NOTICES.md`, `LEEME.txt`) y su
+  `.sha256`, y publicando con `gh release create` sin sobrescribir releases existentes.
+- `CHANGELOG.md`, `docs/RELEASING.md` y `README.md` actualizados para `v0.1.0` (solo Windows).
+
 ## Ítems pendientes
-
-### 13. Release v0.1
-
-- Workflow de release en GitHub Actions que publica el ejecutable de Windows (con `THIRD_PARTY_NOTICES.md` y
-  licencias).
-- `README.md` actualizado con el alcance real (solo Windows en v0.1) y las mediciones reproducibles de RAM y CPU.
 
 ### 12b. Autoocultar (v0.2)
 
