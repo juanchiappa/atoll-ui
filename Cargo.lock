@@ -55,6 +55,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "atoll-ui"
+version = "0.1.0"
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -14,6 +14,7 @@
 | `atoll-platform` | `core/atoll-platform` | Código específico de SO (`cfg(target_os)`), traits `Backend` y `Painter`, y módulos portables `animation`, `clock` y `dpi` |
 | `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` (con radio independiente por esquina `CornerRadii`) y texto con `fontdue` (fuente embebida y caché de glifos) |
 | `atoll-config` | `packages/atoll-config` | Configuración, temas y comportamiento de Atoll: parser y serializador propios sin dependencias externas |
+| `atoll-ui` | `packages/atoll-ui` | Mini toolkit declarativo de widgets: árbol de datos (`Node`, `WidgetKind`), validación con límites y motor de layout puro (`compute_layout`), sin dependencias externas |
 | `atoll-ipc` | `packages/atoll-ipc` | Protocolo IPC local Core ↔ plugins |
 | `atoll-plugin-sdk` | `packages/atoll-plugin-sdk` | SDK para autores de plugins |
 

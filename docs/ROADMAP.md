@@ -41,7 +41,10 @@ Referencia: Hecho / En revisión / Pendiente.
 | 12a | Comportamiento configurable (`hover_delay_ms`, `animation_ms`, `style = island \| notch`) (#13) | Hecho |
 | 13 | Release v0.1: workflow de release con ejecutable de Windows y README | Hecho |
 | 12b | Autoocultar (v0.2) | Pendiente |
-| 14 | `atoll-ui`, mini toolkit de widgets | Pendiente |
+| 14a | `atoll-ui`: árbol de widgets, validación y motor de layout puro | Hecho |
+| 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Pendiente |
+| 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `UiTheme` | Pendiente |
+| 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Pendiente |
 | 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
 | 16 | Idiomas es/en | Pendiente |
 | 17 | `atoll-settings`, menú de configuración (ejecutable aparte) | Pendiente |
@@ -124,16 +127,30 @@ Referencia: Hecho / En revisión / Pendiente.
   `.sha256`, y publicando con `gh release create` sin sobrescribir releases existentes.
 - `CHANGELOG.md`, `docs/RELEASING.md` y `README.md` actualizados para `v0.1.0` (solo Windows).
 
+### 14a. `atoll-ui`: árbol de widgets y motor de layout puro (hecho)
+
+- Crate `packages/atoll-ui` sin dependencias externas ni internas: tipos enteros propios (`Size`, `Rect`, `Rgba`),
+  `Node`, `WidgetKind` (`Row`, `Column`, `Box`, `Spacer`, `Divider`, `Label`, `Icon`, `ProgressBar`, `Button`,
+  `IconButton`, `Toggle`, `Slider`), `WidgetId`, `Permille`, `IconId` (`#[non_exhaustive]`), `Edges`, `Length`
+  (`Auto`, `Fixed`, `Fill`), `MainAlign`, `CrossAlign` y trait `TextMeasurer`.
+- Validación explícita `validate_tree` (sin panics) con límites de profundidad (`32`), cantidad de nodos (`1024`),
+  unicidad de `WidgetId` no cero y validación de rangos (`Permille <= 1000`, dimensiones lógicas `<= 4096`).
+- Motor de layout puro y determinista (`compute_layout`) con aritmética saturante: ningún hijo desborda jamás el
+  `content_rect` de su padre, probado con tests unitarios y de invariantes sobre árboles generados por PRNG en Linux.
+
 ## Ítems pendientes
 
 ### 12b. Autoocultar (v0.2)
 
 - Opción de autoocultar la isla y mostrarla al acercar el puntero al borde superior (movido de la v0.1 a la v0.2).
 
-### 14. `atoll-ui`, mini toolkit de widgets
+### 14b–14d. `atoll-ui`: interacción, pintado e integración con la isla
 
-- Crate `packages/atoll-ui` sobre `atoll-render`: texto, íconos, filas y columnas, botones, toggles, sliders y
-  detección de clics. Base del contenido de la isla, de los widgets de plugins y de `atoll-settings`.
+- **14b:** Hit-testing, estado de interacción (`InteractionState`) y ruteo de eventos (`PointerEvent` -> `UiOutput`).
+- **14c:** Pintado con `atoll-render`, íconos vectoriales como comandos de trazo planos (`atoll-ui` no depende de
+  `tiny-skia`) y derivación de `UiTheme` desde `atoll-config`.
+- **14d:** Eventos de mouse en Windows (`WM_LBUTTONDOWN`, `WM_LBUTTONUP`) y migración del reloj de la isla a un
+  árbol de widgets de `atoll-ui`.
 
 ### 15. Protocolo IPC y host de plugins
 
