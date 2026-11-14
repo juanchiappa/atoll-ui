@@ -458,38 +458,72 @@ impl UiState {
 /// Paleta de colores resuelta a partir de `AppearanceSection` de `atoll-config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThemePalette {
-    /// Fondo principal de la superficie (con opacidad aplicada).
-    pub background: Color,
-    /// Color principal del texto (`Tone::Primary`).
-    pub text_primary: Color,
-    /// Color secundario del texto (`Tone::Muted`, ~75 % del alfa de `text_primary`).
-    pub text_muted: Color,
-    /// Superficie de controles en reposo (mezcla sutil de `text_primary` al 12 % sobre el fondo).
-    pub control_bg: Color,
-    /// Superficie de controles en hover (mezcla al 20 %).
-    pub control_hover_bg: Color,
-    /// Superficie de controles presionados (mezcla al 28 %).
-    pub control_active_bg: Color,
-    /// Color de acento para `ButtonVariant::Primary`, `Toggle` activo, `Slider` y `Progress`.
-    pub accent: Color,
-    /// Color de líneas divisorias (`Separator`, mezcla al 15 %).
-    pub separator: Color,
+    /// Fondo principal de la superficie (con la opacidad general aplicada).
+    pub background: Rgba,
+    /// Color principal de texto e íconos (`Tone::Primary`).
+    pub text_primary: Rgba,
+    /// Color secundario de texto e íconos (`Tone::Muted`, 75 % del alfa de `text_primary`).
+    pub text_muted: Rgba,
+    /// Color de texto e íconos en controles deshabilitados (42 % del alfa de `text_primary`).
+    pub text_disabled: Rgba,
+    /// Color de acento derivado del preset (`#0A84FF` en `black`/`graphite`, `#0066CC` en `white`).
+    pub accent: Rgba,
+    /// Color de acento en estado `hover`.
+    pub accent_hover: Rgba,
+    /// Color de acento en estado `pressed` (`active`).
+    pub accent_active: Rgba,
+    /// Color de acento en estado `disabled`.
+    pub accent_disabled: Rgba,
+    /// Color de texto o ícono sobre fondo `accent` (`ButtonVariant::Primary`).
+    pub on_accent: Rgba,
+    /// Color de texto o ícono sobre fondo `accent_disabled`.
+    pub on_accent_disabled: Rgba,
+    /// Superficie de controles secundarios o pistas en reposo (`normal`).
+    pub control_bg: Rgba,
+    /// Superficie de controles secundarios en estado `hover`.
+    pub control_hover_bg: Rgba,
+    /// Superficie de controles secundarios en estado `pressed` (`active`).
+    pub control_active_bg: Rgba,
+    /// Superficie de controles secundarios en estado `disabled`.
+    pub control_disabled_bg: Rgba,
+    /// Superficie de botones `ButtonVariant::Ghost` en estado `hover`.
+    pub ghost_hover_bg: Rgba,
+    /// Superficie de botones `ButtonVariant::Ghost` en estado `pressed` (`active`).
+    pub ghost_active_bg: Rgba,
+    /// Color de la perilla (`knob`) de `Toggle` y `Slider` habilitados.
+    pub knob: Rgba,
+    /// Color de la perilla (`knob`) de `Toggle` y `Slider` deshabilitados.
+    pub knob_disabled: Rgba,
+    /// Color de las líneas divisorias (`Separator` / `Divider`).
+    pub separator: Rgba,
 }
 
 impl ThemePalette {
     /// Construye la paleta a partir de la sección `[appearance]` de `atoll-config`.
     #[must_use]
-    pub fn from_appearance(appearance: &atoll_config::AppearanceSection) -> Self;
+    pub const fn from_appearance(appearance: &atoll_config::AppearanceSection) -> Self;
 }
 
-/// Dibuja un `LayoutTree` sobre un `Frame` ya inicializado.
+/// Dibuja el árbol `(tree, layout)` sobre `frame` aplicando `ui_state`, `palette` y `scale`.
 pub fn paint_tree(
-    frame: &mut atoll_render::Frame,
+    tree: &Node,
     layout: &LayoutTree,
-    state: &UiState,
+    ui_state: &UiState,
     palette: &ThemePalette,
-    text: &mut atoll_render::TextRenderer,
-) -> Result<(), atoll_render::RenderError>;
+    scale: f32,
+    frame: &mut atoll_render::Frame,
+);
+
+/// Igual que `paint_tree`, reutilizando un `TextRenderer` provisto por el llamador.
+pub fn paint_tree_with_text(
+    tree: &Node,
+    layout: &LayoutTree,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    frame: &mut atoll_render::Frame,
+    text_renderer: &mut atoll_render::TextRenderer,
+);
 ```
 
 ---

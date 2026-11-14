@@ -6,7 +6,7 @@ Atoll es Apache-2.0 (ver `LICENSE`). Incluye o depende de lo siguiente.
 
 Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter).
 Licencia: SIL Open Font License, Version 1.1. Texto completo en `core/atoll-render/assets/Inter-OFL.txt`.
-Se incluye recortada (ver `docs/FONTS.md`) en `core/atoll-render/assets/Inter-Medium-atoll.ttf`.
+Se incluye recortada a 222 glifos (ver `docs/FONTS.md`) en `core/atoll-render/assets/Inter-Medium-atoll.ttf`.
 
 ## Crates de Rust
 

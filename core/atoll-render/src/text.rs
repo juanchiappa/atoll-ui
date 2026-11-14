@@ -12,9 +12,9 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings};
 
-use crate::{Frame, RenderError};
+use crate::{ClipRect, Frame, RenderError};
 
-/// Fuente embebida: Inter Medium recortada a dígitos, signos básicos y letras del español.
+/// Fuente embebida: Inter Medium recortada a ASCII imprimible, Latin-1 Supplement y signos comunes.
 const FONT_BYTES: &[u8] = include_bytes!("../assets/Inter-Medium-atoll.ttf");
 
 /// Tamaño máximo de fuente aceptado, en píxeles.
@@ -114,6 +114,15 @@ impl TextRenderer {
         self.cache.len()
     }
 
+    /// Indica si la fuente embebida contiene un glifo propio para `ch` (distinto de `.notdef`).
+    ///
+    /// Es una consulta de solo lectura sobre la tabla de glifos de la fuente; no rasteriza
+    /// ni modifica la caché.
+    #[must_use]
+    pub fn supports(&self, ch: char) -> bool {
+        self.font.lookup_glyph_index(ch) != 0
+    }
+
     /// Vacía la caché de glifos.
     ///
     /// Se usa cuando cambia el factor de escala (DPI): los glifos rasterizados para
@@ -173,18 +182,45 @@ impl TextRenderer {
         size_px: f32,
         color: Color,
     ) -> Result<f32, RenderError> {
+        let clip = ClipRect::from_size(frame.size());
+        self.draw_clipped(frame, text, x, y, size_px, color, clip)
+    }
+
+    /// Igual que [`TextRenderer::draw`], pero recortando los píxeles dibujados a la
+    /// intersección entre `clip` y los límites de `frame`.
+    ///
+    /// # Errors
+    ///
+    /// Devuelve [`RenderError::InvalidTextParams`] si `size_px` no es válido o si `x` o `y`
+    /// no son finitos o están fuera de rango.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_clipped(
+        &mut self,
+        frame: &mut Frame,
+        text: &str,
+        x: f32,
+        y: f32,
+        size_px: f32,
+        color: Color,
+        clip: ClipRect,
+    ) -> Result<f32, RenderError> {
         check_size(size_px)?;
         check_coord(x)?;
         check_coord(y)?;
 
+        let eff_clip = clip.intersect(ClipRect::from_size(frame.size()));
         let baseline = y.round() as i64;
         let mut pen = x;
         for ch in text.chars().filter(|c| !c.is_control()) {
             let glyph = self.glyph(ch, size_px);
             let left = pen.round() as i64 + i64::from(glyph.xmin);
             let top = baseline - i64::from(glyph.ymin) - glyph.height as i64;
-            blit(frame, glyph, left, top, color);
-            pen += glyph.advance;
+            let advance = glyph.advance;
+            if eff_clip.width > 0 && eff_clip.height > 0 && color.a > 0 {
+                let glyph_clone = glyph.clone();
+                blit_clipped(frame, &glyph_clone, left, top, color, eff_clip);
+            }
+            pen += advance;
         }
         Ok(pen - x)
     }
@@ -237,22 +273,34 @@ const fn mul_div_255(a: u32, b: u32) -> u32 {
     (t + (t >> 8)) >> 8
 }
 
-/// Compone la cobertura de un glifo con `color` sobre el frame, recortando lo que sobra.
-fn blit(frame: &mut Frame, glyph: &Glyph, left: i64, top: i64, color: Color) {
+/// Compone la cobertura de un glifo con `color` sobre el frame, recortando a `clip`.
+fn blit_clipped(
+    frame: &mut Frame,
+    glyph: &Glyph,
+    left: i64,
+    top: i64,
+    color: Color,
+    clip: ClipRect,
+) {
     let frame_w = i64::from(frame.size.width);
     let frame_h = i64::from(frame.size.height);
-    if glyph.width == 0 || glyph.height == 0 {
+    if glyph.width == 0 || glyph.height == 0 || clip.width == 0 || clip.height == 0 {
         return;
     }
 
+    let min_x = i64::from(clip.x).max(0);
+    let min_y = i64::from(clip.y).max(0);
+    let max_x = i64::from(clip.right()).min(frame_w);
+    let max_y = i64::from(clip.bottom()).min(frame_h);
+
     for row in 0..glyph.height {
         let y = top + row as i64;
-        if y < 0 || y >= frame_h {
+        if y < min_y || y >= max_y {
             continue;
         }
         for col in 0..glyph.width {
             let x = left + col as i64;
-            if x < 0 || x >= frame_w {
+            if x < min_x || x >= max_x {
                 continue;
             }
             let Some(&coverage) = glyph.coverage.get(row * glyph.width + col) else {
@@ -260,7 +308,7 @@ fn blit(frame: &mut Frame, glyph: &Glyph, left: i64, top: i64, color: Color) {
             };
             if coverage == 0 {
                 continue;
-            }
+            };
             let Ok(start) = usize::try_from((y * frame_w + x) * 4) else {
                 continue;
             };
@@ -329,15 +377,32 @@ mod tests {
     #[test]
     fn embedded_font_has_every_character_we_need() {
         let r = renderer();
-        let needed =
-            "0123456789:./,- abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZáéíóúñÁÉÍÓÚÑ";
-        for ch in needed.chars().filter(|c| *c != ' ') {
-            assert_ne!(
-                r.font.lookup_glyph_index(ch),
-                0,
-                "falta {ch:?} en la fuente"
+        for ch in '\u{0020}'..='\u{007E}' {
+            assert!(
+                r.supports(ch),
+                "falta el carácter ASCII {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
             );
         }
+        // En Inter v4.1 todos los puntos de código de Latin-1 Supplement (U+00A0..=U+00FF)
+        // tienen glifo salvo U+00AD (SOFT HYPHEN, carácter de formato invisible).
+        for ch in ('\u{00A0}'..='\u{00FF}').filter(|&c| c != '\u{00AD}') {
+            assert!(
+                r.supports(ch),
+                "falta el carácter Latin-1 {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
+            );
+        }
+        let extra = ['•', '·', '…', '–', '—', '‘', '’', '“', '”', '€', '°', '×'];
+        for ch in extra {
+            assert!(
+                r.supports(ch),
+                "falta el símbolo {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
+            );
+        }
+        assert!(!r.supports('\u{00AD}'), "U+00AD no tiene glifo en Inter");
+        assert!(!r.supports('日'), "CJK queda fuera del subconjunto");
     }
 
     #[test]

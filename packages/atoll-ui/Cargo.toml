@@ -1,12 +1,16 @@
 [package]
 name = "atoll-ui"
-description = "Mini toolkit declarativo de widgets de Atoll: árbol de datos planos y motor de layout puro."
+description = "Mini toolkit declarativo de widgets de Atoll: árbol de datos, layout, eventos y pintado."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[dependencies]
+atoll-config.workspace = true
+atoll-render.workspace = true
 
 [lints]
 workspace = true

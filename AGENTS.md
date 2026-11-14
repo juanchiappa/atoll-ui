@@ -19,7 +19,7 @@ core/atoll-core        binario "atoll": loop de eventos, contenido (island), est
 core/atoll-platform    TODO el código específico de SO (cfg(target_os)); módulos portables animation, clock y dpi
 core/atoll-render      render por software con tiny-skia; texto con fontdue y fuente embebida
 packages/atoll-config  configuración y temas: parser y serializador propios sin dependencias
-packages/atoll-ui      mini toolkit declarativo de widgets: árbol de datos y motor de layout puro sin dependencias
+packages/atoll-ui      mini toolkit declarativo de widgets: árbol, layout, eventos, tema, íconos y pintado (solo deps internas atoll-config y atoll-render)
 packages/atoll-ipc     protocolo IPC Core <-> plugins
 packages/atoll-plugin-sdk
 plugins/               plugins oficiales (cada uno, proyecto Cargo independiente)

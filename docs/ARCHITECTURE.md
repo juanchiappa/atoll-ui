@@ -12,9 +12,9 @@
 |---|---|---|
 | `atoll-core` | `core/atoll-core` | Binario `atoll`: carga/recarga de `config.ini`, contenido de la isla (`IslandPainter`), estado y host de plugins |
 | `atoll-platform` | `core/atoll-platform` | Código específico de SO (`cfg(target_os)`), traits `Backend` y `Painter`, y módulos portables `animation`, `clock` y `dpi` |
-| `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` (con radio independiente por esquina `CornerRadii`) y texto con `fontdue` (fuente embebida y caché de glifos) |
+| `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` (con radio independiente por esquina `CornerRadii`, primitivas recortadas `fill_rounded_rect` y `stroke_path` sobre comandos planos `PathCmd`) y texto con `fontdue` (`TextRenderer::draw` y `draw_clipped` con fuente embebida y caché de glifos) |
 | `atoll-config` | `packages/atoll-config` | Configuración, temas y comportamiento de Atoll: parser y serializador propios sin dependencias externas |
-| `atoll-ui` | `packages/atoll-ui` | Mini toolkit declarativo de widgets: árbol de datos (`Node`, `WidgetKind`), validación con límites, motor de layout puro (`compute_layout`), hit-testing (`hit_test`) y estado interactivo (`UiState`), sin dependencias externas |
+| `atoll-ui` | `packages/atoll-ui` | Mini toolkit declarativo de widgets: árbol de datos (`Node`, `WidgetKind`), validación con límites, motor de layout puro (`compute_layout`), hit-testing (`hit_test`), estado interactivo (`UiState`), tema (`ThemePalette`), íconos vectoriales (`IconId::commands`) y pintado (`paint_tree`), dependiendo solo de los crates internos `atoll-config` y `atoll-render` (0 dependencias externas) |
 | `atoll-ipc` | `packages/atoll-ipc` | Protocolo IPC local Core ↔ plugins |
 | `atoll-plugin-sdk` | `packages/atoll-plugin-sdk` | SDK para autores de plugins |
 
@@ -59,7 +59,7 @@
   - Se re-sincroniza ante `WM_TIMECHANGE` (el usuario o NTP cambió la hora) y al volver de suspensión (`WM_POWERBROADCAST` con `PBT_APMRESUMEAUTOMATIC` o `PBT_APMRESUMESUSPEND`), porque ahí el timer pudo quedar desfasado.
   - Mientras dura la animación de hover, cada cuadro lee la hora actual, así que el texto siempre está al día. La fecha aparece con un fundido ligado al tamaño de la isla, y la hora se mueve de centrada a bloque superior en el mismo recorrido.
 
-- **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 87 glifos, 8,8 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
+- **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 222 glifos, 18,0 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
 
 ## Fases
 1. Isla dinámica en Windows (v0.1: reloj, DPI, configuración/temas y comportamiento 12a), midiendo RAM y CPU desde el primer commit.
