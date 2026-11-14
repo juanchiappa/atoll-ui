@@ -74,13 +74,17 @@ impl ClipRect {
     /// Comprueba si `inner` está íntegramente contenido dentro de `self`.
     #[must_use]
     pub const fn contains_rect(self, inner: Self) -> bool {
-        inner.x >= self.x
-            && inner.y >= self.y
-            && inner.right() <= self.right()
-            && inner.bottom() <= self.bottom()
+        let self_r = self.x as i64 + self.width as i64;
+        let self_b = self.y as i64 + self.height as i64;
+        let inner_r = inner.x as i64 + inner.width as i64;
+        let inner_b = inner.y as i64 + inner.height as i64;
+        (inner.x as i64) >= (self.x as i64)
+            && (inner.y as i64) >= (self.y as i64)
+            && inner_r <= self_r
+            && inner_b <= self_b
     }
 
-    /// Calcula la intersección entre `self` y `other` con aritmética saturada.
+    /// Calcula la intersección entre `self` y `other` sin desborde de `i32`.
     ///
     /// Si no se solapan o alguno tiene área nula, devuelve [`ClipRect::ZERO`].
     #[must_use]
@@ -88,23 +92,43 @@ impl ClipRect {
         if self.width == 0 || self.height == 0 || other.width == 0 || other.height == 0 {
             return Self::ZERO;
         }
-        let x1 = if self.x > other.x { self.x } else { other.x };
-        let y1 = if self.y > other.y { self.y } else { other.y };
-        let r1 = self.right();
-        let r2 = other.right();
+        let x1 = if self.x > other.x {
+            self.x as i64
+        } else {
+            other.x as i64
+        };
+        let y1 = if self.y > other.y {
+            self.y as i64
+        } else {
+            other.y as i64
+        };
+        let r1 = self.x as i64 + self.width as i64;
+        let r2 = other.x as i64 + other.width as i64;
         let x2 = if r1 < r2 { r1 } else { r2 };
-        let b1 = self.bottom();
-        let b2 = other.bottom();
+        let b1 = self.y as i64 + self.height as i64;
+        let b2 = other.y as i64 + other.height as i64;
         let y2 = if b1 < b2 { b1 } else { b2 };
 
         if x2 <= x1 || y2 <= y1 {
             return Self::ZERO;
         }
+        let w = (x2 - x1) as u64;
+        let h = (y2 - y1) as u64;
+        let width = if w > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            w as u32
+        };
+        let height = if h > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            h as u32
+        };
         Self {
-            x: x1,
-            y: y1,
-            width: x2.abs_diff(x1),
-            height: y2.abs_diff(y1),
+            x: x1 as i32,
+            y: y1 as i32,
+            width,
+            height,
         }
     }
 }
@@ -470,6 +494,9 @@ fn rounded_rect(width: f32, height: f32, radii: CornerRadii) -> Option<Path> {
     builder.finish()
 }
 
+/// Límite seguro de coordenadas en píxeles para el rasterizador en punto fijo (`FDot16`) de `tiny-skia`.
+const SAFE_SKIA_COORD: i64 = 8192;
+
 /// Dibuja un rectángulo con esquinas redondeadas (`radii`) relleno con `color`
 /// sobre `frame`, recortando estrictamente el resultado a `clip`.
 ///
@@ -492,16 +519,15 @@ pub fn fill_rounded_rect(
         return;
     }
 
-    let Some(path) = rounded_rect(rect.width as f32, rect.height as f32, radii) else {
-        return;
-    };
-
     let mut paint = Paint::default();
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     paint.anti_alias = true;
 
     // Caso rápido sin alojamientos: `rect` entra entero dentro del `clip` efectivo.
     if eff_clip.contains_rect(rect) {
+        let Some(path) = rounded_rect(rect.width as f32, rect.height as f32, radii) else {
+            return;
+        };
         if let Some(mut pixmap) =
             PixmapMut::from_bytes(&mut frame.rgba, frame.size.width, frame.size.height)
         {
@@ -518,16 +544,63 @@ pub fn fill_rounded_rect(
 
     // Caso recortado: dibujamos sobre una sub-superficie del tamaño exacto de `work`
     // para garantizar que ni un solo píxel fuera de `eff_clip` se modifique.
+    // Acotamos los bordes lejanos a `[-SAFE_SKIA_COORD, work + SAFE_SKIA_COORD]` para
+    // evitar desbordes del rasterizador en punto fijo (`FDot16`) de `tiny-skia` cuando
+    // `rect` tiene coordenadas o dimensiones extremas (`i32::MIN`, `u32::MAX`).
+    let raw_left = i64::from(rect.x) - i64::from(work.x);
+    let raw_top = i64::from(rect.y) - i64::from(work.y);
+    let raw_right = raw_left + i64::from(rect.width);
+    let raw_bottom = raw_top + i64::from(rect.height);
+
+    let max_x = i64::from(work.width) + SAFE_SKIA_COORD;
+    let max_y = i64::from(work.height) + SAFE_SKIA_COORD;
+
+    let clamped_left = raw_left.clamp(-SAFE_SKIA_COORD, max_x);
+    let clamped_top = raw_top.clamp(-SAFE_SKIA_COORD, max_y);
+    let clamped_right = raw_right.clamp(-SAFE_SKIA_COORD, max_x);
+    let clamped_bottom = raw_bottom.clamp(-SAFE_SKIA_COORD, max_y);
+
+    let eff_w = (clamped_right - clamped_left) as f32;
+    let eff_h = (clamped_bottom - clamped_top) as f32;
+    if eff_w <= 0.0 || eff_h <= 0.0 {
+        return;
+    }
+
+    let orig_max_r = (rect.width.min(rect.height) as f32) / 2.0;
+    let adj_radii = CornerRadii {
+        top_left: if clamped_left != raw_left || clamped_top != raw_top {
+            0.0
+        } else {
+            clamp_radius(radii.top_left, orig_max_r)
+        },
+        top_right: if clamped_right != raw_right || clamped_top != raw_top {
+            0.0
+        } else {
+            clamp_radius(radii.top_right, orig_max_r)
+        },
+        bottom_right: if clamped_right != raw_right || clamped_bottom != raw_bottom {
+            0.0
+        } else {
+            clamp_radius(radii.bottom_right, orig_max_r)
+        },
+        bottom_left: if clamped_left != raw_left || clamped_bottom != raw_bottom {
+            0.0
+        } else {
+            clamp_radius(radii.bottom_left, orig_max_r)
+        },
+    };
+
+    let Some(path) = rounded_rect(eff_w, eff_h, adj_radii) else {
+        return;
+    };
     let Some(mut sub) = copy_sub_pixmap(frame, work) else {
         return;
     };
-    let tx = (i64::from(rect.x) - i64::from(work.x)) as f32;
-    let ty = (i64::from(rect.y) - i64::from(work.y)) as f32;
     sub.as_mut().fill_path(
         &path,
         &paint,
         FillRule::Winding,
-        Transform::from_translate(tx, ty),
+        Transform::from_translate(clamped_left as f32, clamped_top as f32),
         None,
     );
     write_sub_pixmap(frame, work, &sub);
@@ -569,8 +642,11 @@ pub fn stroke_path(
     let grid = f32::from(ICON_GRID_SIZE);
     let sx = (rect.width as f32) / grid;
     let sy = (rect.height as f32) / grid;
-    let map_x = |gx: i16| -> f32 { f32::from(gx) * sx };
-    let map_y = |gy: i16| -> f32 { f32::from(gy) * sy };
+    let tx = (i64::from(rect.x) - i64::from(work.x)) as f32;
+    let ty = (i64::from(rect.y) - i64::from(work.y)) as f32;
+    let coord_limit = SAFE_SKIA_COORD as f32;
+    let map_x = |gx: i16| -> f32 { (tx + f32::from(gx) * sx).clamp(-coord_limit, coord_limit) };
+    let map_y = |gy: i16| -> f32 { (ty + f32::from(gy) * sy).clamp(-coord_limit, coord_limit) };
 
     let mut builder = PathBuilder::new();
     for &cmd in commands {
@@ -606,7 +682,8 @@ pub fn stroke_path(
     };
 
     let min_dim = (rect.width.min(rect.height) as f32).max(1.0);
-    let phys_width = (stroke_width * scale).clamp(1.0, (min_dim / 2.0).max(1.0));
+    let max_stroke = (min_dim / 2.0).clamp(1.0, coord_limit);
+    let phys_width = (stroke_width * scale).clamp(1.0, max_stroke);
     let stroke = Stroke {
         width: phys_width,
         line_cap: LineCap::Round,
@@ -621,15 +698,8 @@ pub fn stroke_path(
     let Some(mut sub) = copy_sub_pixmap(frame, work) else {
         return;
     };
-    let tx = (i64::from(rect.x) - i64::from(work.x)) as f32;
-    let ty = (i64::from(rect.y) - i64::from(work.y)) as f32;
-    sub.as_mut().stroke_path(
-        &path,
-        &paint,
-        &stroke,
-        Transform::from_translate(tx, ty),
-        None,
-    );
+    sub.as_mut()
+        .stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     write_sub_pixmap(frame, work, &sub);
 }
 
@@ -700,8 +770,8 @@ fn write_sub_pixmap(frame: &mut Frame, work: ClipRect, sub: &Pixmap) {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_island, render_island_styled, render_island_with, Color, CornerRadii, Frame,
-        RenderError, Size,
+        fill_rounded_rect, render_island, render_island_styled, render_island_with, stroke_path,
+        ClipRect, Color, CornerRadii, Frame, PathCmd, RenderError, Size, TextRenderer,
     };
 
     /// Píxel RGBA premultiplicado en (x, y).
@@ -829,5 +899,517 @@ mod tests {
             rgba: vec![10, 20, 30, 255],
         };
         assert_eq!(frame.bgra_premultiplied(), vec![30, 20, 10, 255]);
+    }
+
+    #[test]
+    fn frame_new_and_new_filled_validate_sizes_and_fill_all_pixels_with_exact_premultiplied_color()
+    {
+        // Tamaños con cero son rechazados.
+        for bad in [Size::new(0, 0), Size::new(0, 20), Size::new(20, 0)] {
+            assert_eq!(Frame::new(bad), Err(RenderError::InvalidSize(bad)));
+            assert_eq!(
+                Frame::new_filled(bad, Color::WHITE),
+                Err(RenderError::InvalidSize(bad))
+            );
+        }
+
+        // Tamaños inválidos por desborde de memoria son rechazados sin pánico.
+        let huge = Size::new(u32::MAX, u32::MAX);
+        assert_eq!(Frame::new(huge), Err(RenderError::InvalidSize(huge)));
+        assert_eq!(
+            Frame::new_filled(huge, Color::BLACK),
+            Err(RenderError::InvalidSize(huge))
+        );
+
+        // `Frame::new` deja todos los bytes en cero.
+        let empty = Frame::new(Size::new(16, 12)).expect("frame vacío válido");
+        assert_eq!(empty.size(), Size::new(16, 12));
+        assert!(empty.rgba_premultiplied().iter().all(|&b| b == 0));
+
+        // `Frame::new_filled` con color opaco deja todos los píxeles con el color exacto.
+        let opaque_color = Color::rgba(40, 120, 200, 255);
+        let filled_opaque =
+            Frame::new_filled(Size::new(16, 12), opaque_color).expect("frame lleno opaco");
+        let (pixels_op, _) = filled_opaque.rgba_premultiplied().as_chunks::<4>();
+        assert_eq!(pixels_op.len(), 16 * 12);
+        for &px in pixels_op {
+            assert_eq!(px, [40, 120, 200, 255]);
+        }
+
+        // `Frame::new_filled` con semitransparencia deja todos los píxeles con el valor premultiplicado.
+        let semi_color = Color::rgba(200, 100, 50, 128);
+        let filled_semi =
+            Frame::new_filled(Size::new(10, 8), semi_color).expect("frame lleno semitransparente");
+        let (pixels_semi, _) = filled_semi.rgba_premultiplied().as_chunks::<4>();
+        let first = pixels_semi[0];
+        assert_eq!(first[3], 128);
+        assert!((i16::from(first[0]) - 100).abs() <= 1);
+        assert!((i16::from(first[1]) - 50).abs() <= 1);
+        assert!((i16::from(first[2]) - 25).abs() <= 1);
+        for &px in pixels_semi {
+            assert_eq!(px, first, "todos los píxeles deben ser idénticos");
+        }
+    }
+
+    #[test]
+    fn fill_rounded_rect_clamps_radii_larger_than_half_side_and_supports_zero_radius() {
+        let size = Size::new(60, 40);
+        let full_clip = ClipRect::from_size(size);
+        let rect = ClipRect::new(10, 10, 40, 20);
+        let color = Color::rgba(20, 160, 240, 255);
+
+        // El lado menor de `rect` es 20, por lo que el radio máximo efectivo es 10.0.
+        // Un radio de 500.0 o infinito debe acotarse exactamente a 10.0.
+        let mut f_exact = Frame::new(size).expect("f_exact");
+        fill_rounded_rect(
+            &mut f_exact,
+            rect,
+            CornerRadii::uniform(10.0),
+            color,
+            full_clip,
+        );
+
+        let mut f_huge = Frame::new(size).expect("f_huge");
+        fill_rounded_rect(
+            &mut f_huge,
+            rect,
+            CornerRadii::uniform(500.0),
+            color,
+            full_clip,
+        );
+
+        let mut f_inf = Frame::new(size).expect("f_inf");
+        fill_rounded_rect(
+            &mut f_inf,
+            rect,
+            CornerRadii::uniform(f32::INFINITY),
+            color,
+            full_clip,
+        );
+
+        assert_eq!(f_exact.rgba_premultiplied(), f_huge.rgba_premultiplied());
+        assert_eq!(f_exact.rgba_premultiplied(), f_inf.rgba_premultiplied());
+
+        // Con radio 0 (`CornerRadii::ZERO`), el rectángulo es completamente recto:
+        // las 4 esquinas internas son opacas con el color exacto y justo afuera es transparente.
+        let mut f_sharp = Frame::new(size).expect("f_sharp");
+        fill_rounded_rect(&mut f_sharp, rect, CornerRadii::ZERO, color, full_clip);
+        for (x, y) in [(10, 10), (49, 10), (10, 29), (49, 29), (30, 20)] {
+            assert_eq!(pixel(&f_sharp, x, y), [20, 160, 240, 255]);
+        }
+        for (x, y) in [(9, 10), (50, 10), (10, 9), (10, 30)] {
+            assert_eq!(pixel(&f_sharp, x, y), [0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn fill_rounded_rect_per_corner_radii_and_exact_rounded_corner_pixels() {
+        let size = Size::new(60, 40);
+        let full_clip = ClipRect::from_size(size);
+        let rect = ClipRect::new(0, 0, 60, 40);
+        let radii = CornerRadii {
+            top_left: 0.0,
+            top_right: 16.0,
+            bottom_right: 0.0,
+            bottom_left: 8.0,
+        };
+
+        let mut frame = Frame::new(size).expect("frame");
+        fill_rounded_rect(&mut frame, rect, radii, Color::WHITE, full_clip);
+
+        // Esquinas con radio 0.0 (top_left y bottom_right): píxel extremo (0,0) y (59,39) al 100% opaco.
+        assert_eq!(pixel(&frame, 0, 0), [255, 255, 255, 255]);
+        assert_eq!(pixel(&frame, 59, 39), [255, 255, 255, 255]);
+
+        // Esquina superior derecha con radio 16.0: extremo (59, 0) transparente, (56, 2) todavía afuera
+        // del cuarto de círculo (dx=13.5, dy=13.5 -> d^2=364.5 > 256), y (44, 15) bien adentro.
+        assert_eq!(pixel(&frame, 59, 0), [0, 0, 0, 0]);
+        assert_eq!(alpha(&frame, 58, 1), 0);
+        assert_eq!(pixel(&frame, 44, 15), [255, 255, 255, 255]);
+
+        // Esquina inferior izquierda con radio 8.0: extremo (0, 39) transparente, pero en (2, 37)
+        // (que en radio 16 quedaría afuera) ya está opaco o con alta cobertura porque el radio es menor.
+        assert_eq!(pixel(&frame, 0, 39), [0, 0, 0, 0]);
+        assert_eq!(pixel(&frame, 8, 31), [255, 255, 255, 255]);
+        assert!(
+            alpha(&frame, 2, 37) > alpha(&frame, 57, 2),
+            "el radio 8 cubre antes la esquina que el radio 16"
+        );
+    }
+
+    #[test]
+    fn fill_rounded_rect_zero_dimensions_out_of_frame_and_extreme_coordinates() {
+        let size = Size::new(40, 30);
+        let full_clip = ClipRect::from_size(size);
+
+        // 1. Ancho 0 o alto 0 no pintan nada.
+        let mut f_zero = Frame::new(size).expect("f_zero");
+        fill_rounded_rect(
+            &mut f_zero,
+            ClipRect::new(5, 5, 0, 10),
+            CornerRadii::ZERO,
+            Color::WHITE,
+            full_clip,
+        );
+        fill_rounded_rect(
+            &mut f_zero,
+            ClipRect::new(5, 5, 10, 0),
+            CornerRadii::ZERO,
+            Color::WHITE,
+            full_clip,
+        );
+        assert!(f_zero.rgba_premultiplied().iter().all(|&b| b == 0));
+
+        // 2. Parcialmente fuera del Frame (coordenadas negativas: (-10, -5, 20, 15) -> intersecta (0, 0, 10, 10)).
+        let mut f_partial = Frame::new(size).expect("f_partial");
+        fill_rounded_rect(
+            &mut f_partial,
+            ClipRect::new(-10, -5, 20, 15),
+            CornerRadii::ZERO,
+            Color::WHITE,
+            full_clip,
+        );
+        for y in 0..30 {
+            for x in 0..40 {
+                let expected = if x < 10 && y < 10 {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 0]
+                };
+                assert_eq!(pixel(&f_partial, x, y), expected, "en ({x}, {y})");
+            }
+        }
+
+        // 3. Totalmente fuera del Frame y coordenadas extremas (i32::MIN, i32::MAX, u32::MAX) sin desborde ni pánico.
+        let mut f_out = Frame::new(size).expect("f_out");
+        for out_rect in [
+            ClipRect::new(-500, -500, 100, 100),
+            ClipRect::new(500, 500, 100, 100),
+            ClipRect::new(i32::MIN, i32::MIN, 1000, 1000),
+            ClipRect::new(i32::MAX - 10, i32::MAX - 10, u32::MAX, u32::MAX),
+        ] {
+            fill_rounded_rect(
+                &mut f_out,
+                out_rect,
+                CornerRadii::uniform(8.0),
+                Color::WHITE,
+                full_clip,
+            );
+        }
+        assert!(f_out.rgba_premultiplied().iter().all(|&b| b == 0));
+
+        // Rectángulo con coordenadas negativas enormes y dimensiones enormes que cubre todo el Frame.
+        let mut f_huge_cover = Frame::new(size).expect("f_huge_cover");
+        fill_rounded_rect(
+            &mut f_huge_cover,
+            ClipRect::new(-1_000_000_000, -1_000_000_000, u32::MAX, u32::MAX),
+            CornerRadii::ZERO,
+            Color::WHITE,
+            full_clip,
+        );
+        assert_eq!(pixel(&f_huge_cover, 20, 15), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn clip_rect_strictly_prevents_painting_outside_pixel_by_pixel_and_handles_edge_cases() {
+        let size = Size::new(50, 40);
+        let rect = ClipRect::new(4, 4, 42, 32);
+        let clip = ClipRect::new(15, 10, 18, 14);
+
+        let mut frame = Frame::new(size).expect("frame");
+        fill_rounded_rect(
+            &mut frame,
+            rect,
+            CornerRadii::uniform(6.0),
+            Color::rgba(0, 200, 100, 255),
+            clip,
+        );
+        stroke_path(
+            &mut frame,
+            &[
+                PathCmd::MoveTo { x: 0, y: 0 },
+                PathCmd::LineTo { x: 24, y: 24 },
+            ],
+            rect,
+            3.0,
+            1.0,
+            Color::WHITE,
+            clip,
+        );
+
+        let mut inside_painted = 0usize;
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let px = pixel(&frame, x, y);
+                let in_clip = (15..15 + 18).contains(&x) && (10..10 + 14).contains(&y);
+                if in_clip {
+                    if px != [0, 0, 0, 0] {
+                        inside_painted += 1;
+                    }
+                } else {
+                    assert_eq!(
+                        px,
+                        [0, 0, 0, 0],
+                        "ningún píxel puede modificarse fuera de clip: fallo en ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            inside_painted,
+            18 * 14,
+            "todo el interior del clip debe haberse pintado"
+        );
+
+        // Recorte vacío y recorte que no intersecta con la forma no pintan nada.
+        let mut f_empty_clip = Frame::new(size).expect("f_empty_clip");
+        for non_overlapping in [
+            ClipRect::ZERO,
+            ClipRect::new(10, 10, 0, 10),
+            ClipRect::new(10, 10, 10, 0),
+            ClipRect::new(0, 0, 4, 4),
+            ClipRect::new(46, 36, 10, 10),
+        ] {
+            fill_rounded_rect(
+                &mut f_empty_clip,
+                rect,
+                CornerRadii::ZERO,
+                Color::WHITE,
+                non_overlapping,
+            );
+        }
+        assert!(f_empty_clip.rgba_premultiplied().iter().all(|&b| b == 0));
+
+        // Recorte mucho mayor que el Frame funciona acotándose al Frame.
+        let mut f_big_clip = Frame::new(size).expect("f_big_clip");
+        fill_rounded_rect(
+            &mut f_big_clip,
+            ClipRect::new(10, 10, 10, 10),
+            CornerRadii::ZERO,
+            Color::WHITE,
+            ClipRect::new(-5000, -5000, 100_000, 100_000),
+        );
+        assert_eq!(pixel(&f_big_clip, 15, 15), [255, 255, 255, 255]);
+        assert_eq!(pixel(&f_big_clip, 5, 5), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn stroke_path_handles_empty_single_moveto_closed_out_of_grid_scales_thickness_and_coincident_curves(
+    ) {
+        let size = Size::new(48, 48);
+        let full_clip = ClipRect::from_size(size);
+        let icon_rect = ClipRect::new(12, 12, 24, 24);
+
+        // 1. Lista vacía, escala 0 / negativa / no finita, o grosor 0 / negativo / no finito -> no pintan nada.
+        let mut f_noop = Frame::new(size).expect("f_noop");
+        let simple_line = [
+            PathCmd::MoveTo { x: 2, y: 12 },
+            PathCmd::LineTo { x: 22, y: 12 },
+        ];
+        stroke_path(
+            &mut f_noop,
+            &[],
+            icon_rect,
+            2.0,
+            1.0,
+            Color::WHITE,
+            full_clip,
+        );
+        for bad_scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            stroke_path(
+                &mut f_noop,
+                &simple_line,
+                icon_rect,
+                2.0,
+                bad_scale,
+                Color::WHITE,
+                full_clip,
+            );
+        }
+        for bad_width in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+            stroke_path(
+                &mut f_noop,
+                &simple_line,
+                icon_rect,
+                bad_width,
+                1.0,
+                Color::WHITE,
+                full_clip,
+            );
+        }
+        assert!(f_noop.rgba_premultiplied().iter().all(|&b| b == 0));
+
+        // 2. Solo un MoveTo, y curvas QuadTo / CubicTo con puntos coincidentes -> nunca entran en pánico.
+        let degenerate_cmds = [
+            PathCmd::MoveTo { x: 12, y: 12 },
+            PathCmd::QuadTo {
+                cx: 12,
+                cy: 12,
+                x: 12,
+                y: 12,
+            },
+            PathCmd::CubicTo {
+                c1x: 12,
+                c1y: 12,
+                c2x: 12,
+                c2y: 12,
+                x: 12,
+                y: 12,
+            },
+            PathCmd::Close,
+        ];
+        stroke_path(
+            &mut f_noop,
+            &[PathCmd::MoveTo { x: 12, y: 12 }],
+            icon_rect,
+            2.0,
+            1.0,
+            Color::WHITE,
+            full_clip,
+        );
+        stroke_path(
+            &mut f_noop,
+            &degenerate_cmds,
+            icon_rect,
+            2.0,
+            1.0,
+            Color::WHITE,
+            full_clip,
+        );
+
+        // 3. Trazo cerrado con QuadTo, CubicTo y Close dibuja dentro de `icon_rect` y cero afuera.
+        let mut f_closed = Frame::new(size).expect("f_closed");
+        let closed_cmds = [
+            PathCmd::MoveTo { x: 4, y: 4 },
+            PathCmd::LineTo { x: 20, y: 4 },
+            PathCmd::QuadTo {
+                cx: 22,
+                cy: 12,
+                x: 20,
+                y: 20,
+            },
+            PathCmd::CubicTo {
+                c1x: 15,
+                c1y: 22,
+                c2x: 9,
+                c2y: 22,
+                x: 4,
+                y: 20,
+            },
+            PathCmd::Close,
+        ];
+        stroke_path(
+            &mut f_closed,
+            &closed_cmds,
+            icon_rect,
+            2.0,
+            1.0,
+            Color::WHITE,
+            full_clip,
+        );
+        assert!(
+            alpha(&f_closed, 12 + 12, 12 + 4) > 0,
+            "el segmento superior del camino cerrado debe pintarse"
+        );
+        assert!(
+            alpha(&f_closed, 12 + 4, 12 + 12) > 0,
+            "el segmento de cierre (Close) izquierdo debe pintarse"
+        );
+
+        // 4. Coordenadas fuera de la grilla 24x24 y escala muy grande quedan estrictamente contenidas en `icon_rect`.
+        let mut f_out_grid = Frame::new(size).expect("f_out_grid");
+        let out_grid_cmds = [
+            PathCmd::MoveTo { x: -50, y: -50 },
+            PathCmd::LineTo { x: 100, y: 100 },
+            PathCmd::MoveTo {
+                x: i16::MIN,
+                y: i16::MIN,
+            },
+            PathCmd::LineTo {
+                x: i16::MAX,
+                y: i16::MAX,
+            },
+        ];
+        stroke_path(
+            &mut f_out_grid,
+            &out_grid_cmds,
+            icon_rect,
+            4.0,
+            1000.0,
+            Color::WHITE,
+            full_clip,
+        );
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let in_icon = (12..36).contains(&x) && (12..36).contains(&y);
+                if !in_icon {
+                    assert_eq!(
+                        pixel(&f_out_grid, x, y),
+                        [0, 0, 0, 0],
+                        "stroke_path fuera de la grilla 24x24 no puede pintar fuera de rect: ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(alpha(&f_out_grid, 24, 24) > 0);
+
+        // 5. `rect` con coordenadas negativas enormes y dimensiones `u32::MAX` tampoco entra en pánico.
+        stroke_path(
+            &mut f_out_grid,
+            &simple_line,
+            ClipRect::new(-1_000_000_000, -1_000_000_000, u32::MAX, u32::MAX),
+            2.0,
+            1.0,
+            Color::WHITE,
+            full_clip,
+        );
+    }
+
+    #[test]
+    fn primitives_are_strictly_deterministic_byte_for_byte() {
+        let build_scene = || -> Frame {
+            let size = Size::new(80, 50);
+            let full_clip = ClipRect::from_size(size);
+            let mut frame =
+                Frame::new_filled(size, Color::rgba(28, 28, 30, 255)).expect("frame base");
+
+            fill_rounded_rect(
+                &mut frame,
+                ClipRect::new(6, 6, 68, 38),
+                CornerRadii::uniform(10.0),
+                Color::rgba(10, 132, 255, 220),
+                ClipRect::new(4, 4, 72, 42),
+            );
+            stroke_path(
+                &mut frame,
+                &[
+                    PathCmd::MoveTo { x: 4, y: 12 },
+                    PathCmd::LineTo { x: 10, y: 18 },
+                    PathCmd::LineTo { x: 20, y: 6 },
+                ],
+                ClipRect::new(10, 13, 24, 24),
+                2.0,
+                1.25,
+                Color::WHITE,
+                full_clip,
+            );
+            let mut text = TextRenderer::new().expect("fuente");
+            let _ = text
+                .draw_clipped(
+                    &mut frame,
+                    "Atoll",
+                    38.0,
+                    30.0,
+                    16.0,
+                    Color::WHITE,
+                    ClipRect::new(36, 10, 40, 30),
+                )
+                .expect("draw_clipped");
+            frame
+        };
+
+        let frame_a = build_scene();
+        let frame_b = build_scene();
+        assert_eq!(frame_a.rgba_premultiplied(), frame_b.rgba_premultiplied());
     }
 }
