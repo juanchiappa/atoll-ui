@@ -42,7 +42,7 @@ Referencia: Hecho / En revisión / Pendiente.
 | 13 | Release v0.1: workflow de release con ejecutable de Windows y README | Hecho |
 | 12b | Autoocultar (v0.2) | Pendiente |
 | 14a | `atoll-ui`: árbol de widgets, validación y motor de layout puro | Hecho |
-| 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Pendiente |
+| 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Hecho |
 | 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `UiTheme` | Pendiente |
 | 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Pendiente |
 | 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
@@ -138,15 +138,23 @@ Referencia: Hecho / En revisión / Pendiente.
 - Motor de layout puro y determinista (`compute_layout`) con aritmética saturante: ningún hijo desborda jamás el
   `content_rect` de su padre, probado con tests unitarios y de invariantes sobre árboles generados por PRNG en Linux.
 
+### 14b. `atoll-ui`: hit-testing, estado interactivo y ruteo de eventos (hecho)
+
+- Hit-testing puro (`hit_test`): detecta widgets interactivos habilitados (`Button`, `IconButton`, `Toggle`, `Slider`),
+  respetando bordes `[x, x + w) × [y, y + h)`, solapamiento (gana el último hijo) y recorte por `content_rect` de los
+  ancestros.
+- Estado interactivo por `WidgetId` (`UiState::handle` y `UiState::sync`) sin mutar el árbol: captura de clic en
+  `Button`/`IconButton`/`Toggle` al salir y volver a entrar, arrastre continuo en `Slider` acotado a `0..=1000` permille
+  sin división por cero, ignorado de botones no izquierdos y rueda, y cálculo exacto de `needs_redraw`.
+
 ## Ítems pendientes
 
 ### 12b. Autoocultar (v0.2)
 
 - Opción de autoocultar la isla y mostrarla al acercar el puntero al borde superior (movido de la v0.1 a la v0.2).
 
-### 14b–14d. `atoll-ui`: interacción, pintado e integración con la isla
+### 14c–14d. `atoll-ui`: pintado e integración con la isla
 
-- **14b:** Hit-testing, estado de interacción (`InteractionState`) y ruteo de eventos (`PointerEvent` -> `UiOutput`).
 - **14c:** Pintado con `atoll-render`, íconos vectoriales como comandos de trazo planos (`atoll-ui` no depende de
   `tiny-skia`) y derivación de `UiTheme` desde `atoll-config`.
 - **14d:** Eventos de mouse en Windows (`WM_LBUTTONDOWN`, `WM_LBUTTONUP`) y migración del reloj de la isla a un

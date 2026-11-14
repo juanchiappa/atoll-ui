@@ -352,73 +352,101 @@ pub fn compute_layout(
 
 ## 6. Estado interactivo, hit-testing y eventos (Capa 3)
 
-El árbol `Node` es inmutable entre actualizaciones de estado; el estado transitorio del puntero (qué widget tiene hover, cuál está presionado y cuál se está arrastrando) vive en una estructura liviana `UiState` propiedad de la ventana:
+El árbol `Node` es inmutable y pertenece a la aplicación; el toolkit nunca lo modifica. El estado transitorio del puntero (qué widget tiene hover, cuál capturó una presión y cuál se está arrastrando) vive en una estructura liviana `UiState` por `WidgetId` (sin referencias):
 
 ```rust
-/// Entrada del puntero entregada por el backend de la plataforma (en píxeles físicos).
+/// Botón del mouse asociado a un evento de presión o soltado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PointerButton {
+    #[default]
+    Left,
+    Right,
+    Middle,
+    Other(u8),
+}
+
+/// Entrada del puntero entregada a `UiState::handle` (en píxeles físicos).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerInput {
-    /// El puntero se movió a `(x, y)` dentro de la ventana.
+    /// El puntero se movió a `(x, y)` dentro de la superficie.
     Move { x: i32, y: i32 },
-    /// El puntero salió de la ventana (`WM_MOUSELEAVE`).
+    /// El puntero salió de la superficie (`WM_MOUSELEAVE`).
     Leave,
-    /// Se presionó el botón izquierdo en `(x, y)`.
-    Down { x: i32, y: i32 },
-    /// Se soltó el botón izquierdo en `(x, y)`.
-    Up { x: i32, y: i32 },
+    /// Se presionó un botón del mouse en `(x, y)`.
+    Down { x: i32, y: i32, button: PointerButton },
+    /// Se soltó un botón del mouse en `(x, y)`.
+    Up { x: i32, y: i32, button: PointerButton },
+    /// Giro de la rueda del mouse en `(x, y)`.
+    Wheel { x: i32, y: i32, delta_x: i16, delta_y: i16 },
 }
 
 /// Evento semántico emitido por un widget cuando el usuario interactúa con él.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiEvent {
-    /// Se hizo clic completo (presionar y soltar sobre el mismo `Button`).
+    /// Se hizo clic completo (presionar y soltar dentro del mismo `Button` o `IconButton`).
     Clicked(WidgetId),
-    /// Un `Toggle` cambió su valor booleano al hacerle clic.
+    /// Un `Toggle` pidió cambiar su valor booleano al soltarse dentro de él.
     Toggled { id: WidgetId, checked: bool },
-    /// Un `Slider` cambió su valor (al hacer clic o arrastrar).
+    /// Un `Slider` pidió actualizar su valor (al presionar sobre la pista o arrastrar).
     SliderChanged { id: WidgetId, value: Permille },
 }
 
 /// Resultado de procesar una entrada del puntero.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InteractionOutcome {
-    /// `true` si cambió algún estado visual (`hovered`, `pressed` o valor de slider)
-    /// y por lo tanto hay que redibujar una vez.
+    /// `true` únicamente si cambió algún estado visual (`hovered`, `pressed` visual o `dragging_slider`)
+    /// o hubo un evento de arrastre/interacción.
     pub needs_redraw: bool,
     /// Eventos de alto nivel generados en este paso (0 o 1 en la práctica).
     pub events: Vec<UiEvent>,
 }
 
+/// Hit-testing puro sobre `(tree, layout)` en coordenadas físicas `(x, y)`.
+#[must_use]
+pub fn hit_test(tree: &Node, layout: &LayoutTree, x: i32, y: i32) -> Option<WidgetId>;
+
 /// Estado interactivo efímero de la interfaz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UiState {
     hovered: Option<WidgetId>,
-    pressed: Option<WidgetId>,
+    captured_press: Option<WidgetId>,
     dragging_slider: Option<WidgetId>,
 }
 
 impl UiState {
-    /// Procesa un evento del puntero contra el `LayoutTree` actual sin tocar el SO.
-    pub fn handle_pointer(
+    /// Procesa una entrada del puntero contra `tree` y `layout` sin tocar el SO ni mutar el árbol.
+    #[must_use]
+    pub fn handle(
         &mut self,
+        tree: &Node,
         layout: &LayoutTree,
         input: PointerInput,
     ) -> InteractionOutcome;
 
+    /// Sincroniza el estado cuando cambia el árbol: limpia cualquier id que haya desaparecido
+    /// o dejado de ser interactivo habilitado, y devuelve `true` si hace falta redibujar.
+    pub fn sync(&mut self, tree: &Node, layout: &LayoutTree) -> bool;
+
     /// Indica si `id` tiene el puntero encima.
     #[must_use]
-    pub fn is_hovered(&self, id: WidgetId) -> bool;
+    pub const fn is_hovered(&self, id: WidgetId) -> bool;
 
-    /// Indica si `id` está siendo presionado o arrastrado.
+    /// Indica si `id` se ve presionado actualmente (`captured_press == Some(id) && hovered == Some(id)`).
     #[must_use]
-    pub fn is_active(&self, id: WidgetId) -> bool;
+    pub const fn is_pressed(&self, id: WidgetId) -> bool;
+
+    /// Indica si `id` está visualmente activo (presionado dentro de sus límites o arrastrándose).
+    #[must_use]
+    pub const fn is_active(&self, id: WidgetId) -> bool;
 }
 ```
 
-### Semántica de interacción
-- **Hover:** `PointerInput::Move` busca el último widget interactivo habilitado (`enabled == true` y `id != WidgetId::NONE`) cuyo `rect` contenga `(x, y)`. Solo si el `hovered` resultante es distinto del anterior, `needs_redraw = true` (evita redibujar en cada píxel que se mueve el mouse dentro del mismo botón o sobre zonas sin widgets interactivos).
-- **Clic (`Button` y `Toggle`):** `Down` sobre un widget habilitado guarda `pressed = Some(id)` (`needs_redraw = true`). `Up` emite `UiEvent::Clicked(id)` o `UiEvent::Toggled { id, checked: ! current }` únicamente si el puntero sigue dentro del `rect` de ese mismo `id`; en todos los casos limpia `pressed = None`.
-- **Arrastre (`Slider`):** `Down` sobre un `Slider` habilitado fija `dragging_slider = Some(id)`, calcula el `Permille` según `(x - rect.x) / rect.width` acotado a `0..=1000`, y emite `UiEvent::SliderChanged`. Mientras `dragging_slider == Some(id)`, cualquier `Move` actualiza el `Permille` (incluso si el puntero se desvía verticalmente fuera del slider) y solo marca `needs_redraw = true` si el `Permille` cambió. `Up` o `Leave` termina el arrastre.
+### Semántica de hit-testing e interacción
+- **Hit-testing (`hit_test`):** solo son objetivos los widgets interactivos habilitados (`enabled == true` y `id != WidgetId::NONE`): `Button`, `IconButton`, `Toggle` y `Slider`. `Label`, `Icon`, `Spacer`, `Divider` (`Separator`), `ProgressBar` (`Progress`) y los contenedores (`Row`, `Column`, `Box`) nunca capturan el puntero. Si hay solapamiento, gana el último hijo (el que se dibuja encima). Los hijos recortados por el `content_rect` de su padre no responden fuera de su región visible. Bordes: inclusivo a izquierda y arriba, exclusivo a derecha y abajo.
+- **Hover y `needs_redraw` exacto:** `PointerInput::Move` devuelve `needs_redraw = false` si no cambia ningún estado visual (por ejemplo, moverse dentro del mismo widget sin arrastre o sobre zonas vacías). Devuelve `true` solo si cambia el hover, cambia el estado presionado visual o se emite un evento de arrastre/interacción.
+- **Captura en `Button`, `IconButton` y `Toggle`:** `Down` izquierdo sobre un widget habilitado guarda `captured_press = Some(id)` y el widget se ve presionado (`pressed() == Some(id)`). Si el puntero sale mientras sigue presionado, el widget deja de verse presionado (`pressed() == None`, `needs_redraw = true`), pero el gesto sigue capturado: si vuelve a entrar sin soltar, vuelve a verse presionado; si se suelta afuera, no se emite evento. Solo al soltar adentro del mismo widget se emite `UiEvent::Clicked(id)` o `UiEvent::Toggled { id, checked: !checked }`.
+- **Arrastre (`Slider`):** `Down` izquierdo sobre un `Slider` habilitado inicia `dragging_slider = Some(id)` y emite el valor de esa posición en `Permille` (`0..=1000`). Mientras se arrastra (`Move`), sigue emitiendo aunque el puntero salga del widget (acotado a `0` y `1000` permille, con enteros saturantes y sin división por cero si el ancho de la pista es `0`). Al soltar (`Up` izquierdo), termina el arrastre.
+- **Botones e entradas ignoradas:** solo `PointerButton::Left` interactúa; los demás botones y `PointerInput::Wheel` se ignoran sin cambiar el estado.
 
 ---
 
@@ -529,13 +557,19 @@ Para mantener PRs chicos, revisables y atómicos, el ítem 14 se divide en **4 P
 
 ---
 
-## 10. Decisiones de diseño confirmadas
+## 10. Decisiones de diseño confirmadas y preguntas abiertas
 
 1. **Color de acento (`accent`) en `ThemePalette` (Resuelta):**
    - Se deriva directamente del preset actual (`#0A84FF` en `black` y `graphite`, `#0066CC` en `white`), sin agregar una clave nueva en `config.ini`.
 2. **Catálogo inicial de `IconId` (Resuelta):**
    - `IconId` lleva `#[non_exhaustive]` e incluye los 11 íconos propuestos (`Play`, `Pause`, `NextTrack`, `PreviousTrack`, `Volume`, `VolumeMute`, `Settings`, `Check`, `Close`, `ChevronRight`, `ChevronDown`). En el PR 14c, cualquier id desconocido se tratará como un marcador neutro.
-3. **Botones del mouse (Resuelta):**
-   - Clic izquierdo (`WM_LBUTTONDOWN` / `WM_LBUTTONUP`) para interactuar con los widgets de `atoll-ui`; el clic derecho (`WM_RBUTTONUP`) sigue cerrando la isla.
+3. **Botones del mouse y rueda (Resuelta):**
+   - Solo el clic izquierdo (`PointerButton::Left` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP`) interactúa con los widgets de `atoll-ui`; los demás botones y la rueda del mouse se ignoran sin cambiar el estado. En la ventana de la isla, el clic derecho (`WM_RBUTTONUP`) sigue cerrando la isla.
 4. **Frontera entre `atoll-ui` y `tiny-skia` para el PR 14c (Resuelta):**
-   - `atoll-ui` **NO depende de `tiny-skia`**. En el PR 14c los íconos se definirán como datos planos (lista de comandos de trazo propia) y `atoll-render` expondrá la función para dibujarlos. En el PR 14a `atoll-ui` no tiene ninguna dependencia externa ni interna.
+   - `atoll-ui` **NO depende de `tiny-skia`**. En el PR 14c los íconos se definirán como datos planos (lista de comandos de trazo propia) y `atoll-render` expondrá la función para dibujarlos. En los PRs 14a y 14b `atoll-ui` no tiene ninguna dependencia externa ni interna.
+5. **Captura interactiva, `sync` y widgets deshabilitados en el PR 14b (Resuelta):**
+   - `UiState::handle(&mut self, tree, layout, input)` y `UiState::sync(&mut self, tree, layout) -> bool` operan sin mutar el árbol: los valores de `Toggle` y `Slider` viven en el árbol de la aplicación y el toolkit devuelve `UiEvent`.
+   - Los widgets con `enabled: false` no reaccionan ni capturan el puntero.
+   - Si el puntero sale de un `Button`/`IconButton`/`Toggle` mientras está presionado, deja de verse presionado pero conserva la captura (`captured_press`) hasta soltar; en `Slider`, el arrastre continúa aunque el puntero salga del widget y termina al soltar (`Up`).
+6. **Navegación por teclado y foco (Pregunta abierta):**
+   - El PR 14b no incluye foco ni eventos de teclado (`Tab`, `Enter`, `Espacio`, flechas). Queda abierto definir si se incorporará navegación por teclado al diseñar `atoll-settings` (ítem 17).
