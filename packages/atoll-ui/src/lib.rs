@@ -12,6 +12,10 @@
 //! 3. **Motor de layout ([`compute_layout`]):** algoritmo determinista tipo flex
 //!    (`Auto`, `Fixed`, `Fill`, `Edges`, `MainAlign`, `CrossAlign`) con aritmética
 //!    entera saturada/chequeada y recorte definido dentro del rectángulo del padre.
+//! 4. **Hit-testing y estado interactivo ([`hit_test`], [`UiState`]):** máquina de
+//!    estados pura y determinista que procesa entradas del puntero ([`PointerInput`]),
+//!    emite eventos de alto nivel ([`UiEvent`]) sin mutar el árbol y calcula con
+//!    exactitud cuándo hace falta redibujar (`needs_redraw`).
 
 use std::fmt;
 
@@ -172,6 +176,34 @@ impl Rect {
             && inner.y >= self.y
             && inner.right() <= self.right()
             && inner.bottom() <= self.bottom()
+    }
+
+    /// Calcula la intersección entre `self` y `other`.
+    ///
+    /// Si no se solapan o alguno tiene área nula, devuelve [`Rect::ZERO`].
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        if self.width == 0 || self.height == 0 || other.width == 0 || other.height == 0 {
+            return Self::ZERO;
+        }
+        let x1 = if self.x > other.x { self.x } else { other.x };
+        let y1 = if self.y > other.y { self.y } else { other.y };
+        let r1 = self.right();
+        let r2 = other.right();
+        let x2 = if r1 < r2 { r1 } else { r2 };
+        let b1 = self.bottom();
+        let b2 = other.bottom();
+        let y2 = if b1 < b2 { b1 } else { b2 };
+
+        if x2 <= x1 || y2 <= y1 {
+            return Self::ZERO;
+        }
+        Self {
+            x: x1,
+            y: y1,
+            width: x2.abs_diff(x1),
+            height: y2.abs_diff(y1),
+        }
     }
 }
 
@@ -602,6 +634,23 @@ impl Node {
         })
     }
 
+    /// Crea un contenedor con relleno interno (`padding`) y sus hijos apilados verticalmente sin separación.
+    #[must_use]
+    pub const fn box_container(padding: Edges, children: Vec<Node>) -> Self {
+        Self {
+            id: WidgetId::NONE,
+            width: Length::Auto,
+            height: Length::Auto,
+            padding,
+            kind: WidgetKind::Column {
+                gap: 0,
+                main_align: MainAlign::Start,
+                cross_align: CrossAlign::Start,
+                children,
+            },
+        }
+    }
+
     /// Crea un [`WidgetKind::Spacer`] que rellena el eje principal con peso `weight`.
     #[must_use]
     pub const fn spacer_fill(weight: u8) -> Self {
@@ -609,6 +658,18 @@ impl Node {
             id: WidgetId::NONE,
             width: Length::Fill(weight),
             height: Length::Fill(weight),
+            padding: Edges::ZERO,
+            kind: WidgetKind::Spacer,
+        }
+    }
+
+    /// Crea un [`WidgetKind::Spacer`] con ancho y alto lógicos fijos.
+    #[must_use]
+    pub const fn spacer_fixed(width: u16, height: u16) -> Self {
+        Self {
+            id: WidgetId::NONE,
+            width: Length::Fixed(width),
+            height: Length::Fixed(height),
             padding: Edges::ZERO,
             kind: WidgetKind::Spacer,
         }
@@ -635,6 +696,17 @@ impl Node {
                 enabled,
             },
         }
+    }
+
+    /// Crea un botón de solo ícono ([`WidgetKind::Button`] con `label: None`).
+    #[must_use]
+    pub const fn icon_button(
+        id: WidgetId,
+        icon: IconId,
+        variant: ButtonVariant,
+        enabled: bool,
+    ) -> Self {
+        Self::button(id, None, Some(icon), variant, enabled)
     }
 
     /// Crea un [`WidgetKind::Toggle`].
@@ -667,10 +739,22 @@ impl Node {
         Self::new(WidgetKind::Progress { value, tone })
     }
 
+    /// Alias ergonómico de [`Node::progress`].
+    #[must_use]
+    pub const fn progress_bar(value: Permille, tone: Tone) -> Self {
+        Self::progress(value, tone)
+    }
+
     /// Crea un [`WidgetKind::Separator`] con espesor lógico `thickness_px`.
     #[must_use]
     pub const fn separator(thickness_px: u16) -> Self {
         Self::new(WidgetKind::Separator { thickness_px })
+    }
+
+    /// Alias ergonómico de [`Node::separator`].
+    #[must_use]
+    pub const fn divider(thickness_px: u16) -> Self {
+        Self::separator(thickness_px)
     }
 
     /// Asigna el identificador [`WidgetId`] al nodo.
@@ -1601,14 +1685,597 @@ fn place_flex_children(
     child_indices
 }
 
+// ============================================================================
+// Capa 3: Hit-testing, estado interactivo y ruteo de eventos
+// ============================================================================
+
+/// Botón del mouse asociado a un evento de presión o soltado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PointerButton {
+    /// Botón principal (izquierdo): único botón que interactúa con los widgets.
+    #[default]
+    Left,
+    /// Botón secundario (derecho).
+    Right,
+    /// Botón central (rueda).
+    Middle,
+    /// Cualquier otro botón adicional del mouse (`XButton1`, `XButton2`, etc.).
+    Other(u8),
+}
+
+/// Entrada del puntero entregada a [`UiState::handle`], en coordenadas físicas de píxeles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerInput {
+    /// El puntero se movió a `(x, y)` dentro de la superficie.
+    Move {
+        /// Coordenada X física en píxeles.
+        x: i32,
+        /// Coordenada Y física en píxeles.
+        y: i32,
+    },
+    /// El puntero salió de la superficie (`WM_MOUSELEAVE`).
+    Leave,
+    /// Se presionó un botón del mouse en `(x, y)`.
+    Down {
+        /// Coordenada X física en píxeles.
+        x: i32,
+        /// Coordenada Y física en píxeles.
+        y: i32,
+        /// Botón presionado. Solo [`PointerButton::Left`] interactúa con los widgets.
+        button: PointerButton,
+    },
+    /// Se soltó un botón del mouse en `(x, y)`.
+    Up {
+        /// Coordenada X física en píxeles.
+        x: i32,
+        /// Coordenada Y física en píxeles.
+        y: i32,
+        /// Botón soltado. Solo [`PointerButton::Left`] interactúa con los widgets.
+        button: PointerButton,
+    },
+    /// Giro de la rueda del mouse en `(x, y)`. Se ignora sin modificar el estado.
+    Wheel {
+        /// Coordenada X física en píxeles.
+        x: i32,
+        /// Coordenada Y física en píxeles.
+        y: i32,
+        /// Desplazamiento horizontal de la rueda.
+        delta_x: i16,
+        /// Desplazamiento vertical de la rueda.
+        delta_y: i16,
+    },
+}
+
+impl PointerInput {
+    /// Construye un evento [`PointerInput::Move`] en `(x, y)`.
+    #[must_use]
+    pub const fn move_to(x: i32, y: i32) -> Self {
+        Self::Move { x, y }
+    }
+
+    /// Construye un evento [`PointerInput::Down`] del botón izquierdo en `(x, y)`.
+    #[must_use]
+    pub const fn left_down(x: i32, y: i32) -> Self {
+        Self::Down {
+            x,
+            y,
+            button: PointerButton::Left,
+        }
+    }
+
+    /// Construye un evento [`PointerInput::Up`] del botón izquierdo en `(x, y)`.
+    #[must_use]
+    pub const fn left_up(x: i32, y: i32) -> Self {
+        Self::Up {
+            x,
+            y,
+            button: PointerButton::Left,
+        }
+    }
+
+    /// Construye un evento [`PointerInput::Down`] con un botón explícito en `(x, y)`.
+    #[must_use]
+    pub const fn button_down(x: i32, y: i32, button: PointerButton) -> Self {
+        Self::Down { x, y, button }
+    }
+
+    /// Construye un evento [`PointerInput::Up`] con un botón explícito en `(x, y)`.
+    #[must_use]
+    pub const fn button_up(x: i32, y: i32, button: PointerButton) -> Self {
+        Self::Up { x, y, button }
+    }
+
+    /// Construye un evento [`PointerInput::Wheel`] en `(x, y)`.
+    #[must_use]
+    pub const fn wheel(x: i32, y: i32, delta_x: i16, delta_y: i16) -> Self {
+        Self::Wheel {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        }
+    }
+}
+
+/// Evento semántico emitido cuando el usuario interactúa con un widget.
+///
+/// El toolkit nunca muta el árbol [`Node`]: devuelve estos eventos para que la
+/// aplicación actualice su estado y vuelva a invocar [`compute_layout`] y [`UiState::sync`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiEvent {
+    /// Se completó un clic izquierdo (presionar y soltar dentro del mismo `Button` o `IconButton`).
+    Clicked(WidgetId),
+    /// Un `Toggle` pidió cambiar su estado booleano a `checked` tras soltarse dentro de él.
+    Toggled {
+        /// Identificador del `Toggle`.
+        id: WidgetId,
+        /// Nuevo valor booleano solicitado (`!checked_actual`).
+        checked: bool,
+    },
+    /// Un `Slider` pidió actualizar su valor normalizado (al presionar sobre la pista o arrastrar).
+    SliderChanged {
+        /// Identificador del `Slider`.
+        id: WidgetId,
+        /// Nuevo valor normalizado en milésimas (`0..=1000`).
+        value: Permille,
+    },
+}
+
+/// Resultado de procesar una entrada del puntero con [`UiState::handle`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InteractionOutcome {
+    /// `true` únicamente si cambió algún estado visual (`hovered`, `pressed` visual o `dragging_slider`)
+    /// o se emitió un evento de arrastre/interacción, indicando que hay que redibujar una vez.
+    pub needs_redraw: bool,
+    /// Eventos de alto nivel producidos por la interacción (0 o 1 en la práctica).
+    pub events: Vec<UiEvent>,
+}
+
+impl InteractionOutcome {
+    /// Resultado vacío sin cambios visuales ni eventos (`needs_redraw = false`).
+    pub const NONE: Self = Self {
+        needs_redraw: false,
+        events: Vec::new(),
+    };
+}
+
+/// Determina qué widget interactivo habilitado se encuentra debajo del punto físico `(x, y)`.
+///
+/// # Reglas de hit-testing
+///
+/// - Solo son objetivos los widgets interactivos habilitados (`enabled == true` y
+///   `id != WidgetId::NONE`): [`WidgetKind::Button`] (incluyendo `Node::icon_button`),
+///   [`WidgetKind::Toggle`] y [`WidgetKind::Slider`].
+/// - `Label`, `Icon`, `Spacer`, `Separator` (`Divider`), `Progress` (`ProgressBar`),
+///   los contenedores (`Row`, `Column`, `Box`) y cualquier widget con `enabled == false`
+///   nunca capturan el puntero.
+/// - Si dos hermanos o subárboles se solapan, gana el último hijo (el que se dibuja encima).
+/// - Cada hijo queda recortado por el `content_rect` de todos sus contenedores ancestros:
+///   ningún hijo responde fuera de la región visible de su padre.
+/// - Bordes del rectángulo: inclusivo a izquierda (`x`) y arriba (`y`), exclusivo a derecha
+///   (`x + width`) y abajo (`y + height`).
+#[must_use]
+pub fn hit_test(tree: &Node, layout: &LayoutTree, x: i32, y: i32) -> Option<WidgetId> {
+    let root_lnode = layout.nodes.first()?;
+    let surface_clip = Rect::from_size(layout.available).intersect(root_lnode.rect);
+    hit_test_recursive(tree, 0, surface_clip, layout, x, y, 1)
+}
+
+fn hit_test_recursive(
+    node: &Node,
+    layout_idx: usize,
+    clip: Rect,
+    layout: &LayoutTree,
+    x: i32,
+    y: i32,
+    depth: usize,
+) -> Option<WidgetId> {
+    if depth > MAX_TREE_DEPTH {
+        return None;
+    }
+    let lnode = layout.nodes.get(layout_idx)?;
+    let visible = clip.intersect(lnode.rect);
+    if !visible.contains(x, y) {
+        return None;
+    }
+
+    match (&node.kind, &lnode.kind) {
+        (
+            WidgetKind::Row { children, .. } | WidgetKind::Column { children, .. },
+            LayoutKind::Container {
+                children: layout_children,
+            },
+        ) => {
+            let content_clip = visible.intersect(lnode.content_rect);
+            if !content_clip.contains(x, y) {
+                return None;
+            }
+            for (child_node, &child_idx) in children.iter().zip(layout_children.iter()).rev() {
+                if let Some(hit) =
+                    hit_test_recursive(child_node, child_idx, content_clip, layout, x, y, depth + 1)
+                {
+                    return Some(hit);
+                }
+            }
+            None
+        }
+        (WidgetKind::Button { enabled: true, .. }, LayoutKind::Button { enabled: true, .. })
+        | (WidgetKind::Toggle { enabled: true, .. }, LayoutKind::Toggle { enabled: true, .. })
+        | (WidgetKind::Slider { enabled: true, .. }, LayoutKind::Slider { enabled: true, .. }) => {
+            if !node.id.is_none() && node.id == lnode.id {
+                Some(node.id)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Información resuelta de un widget interactivo habilitado dentro de `(tree, layout)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveTarget {
+    Button,
+    Toggle { checked: bool },
+    Slider { track_rect: Rect },
+}
+
+/// Busca un widget interactivo habilitado por `id` verificando tanto `tree` como `layout`.
+fn find_interactive_target(
+    tree: &Node,
+    layout: &LayoutTree,
+    id: WidgetId,
+) -> Option<InteractiveTarget> {
+    if id.is_none() {
+        return None;
+    }
+    find_interactive_recursive(tree, 0, layout, id, 1)
+}
+
+fn find_interactive_recursive(
+    node: &Node,
+    layout_idx: usize,
+    layout: &LayoutTree,
+    target_id: WidgetId,
+    depth: usize,
+) -> Option<InteractiveTarget> {
+    if depth > MAX_TREE_DEPTH {
+        return None;
+    }
+    let lnode = layout.nodes.get(layout_idx)?;
+
+    if node.id == target_id && lnode.id == target_id {
+        return match (&node.kind, &lnode.kind) {
+            (
+                WidgetKind::Button { enabled: true, .. },
+                LayoutKind::Button { enabled: true, .. },
+            ) => Some(InteractiveTarget::Button),
+            (
+                WidgetKind::Toggle {
+                    checked,
+                    enabled: true,
+                },
+                LayoutKind::Toggle { enabled: true, .. },
+            ) => Some(InteractiveTarget::Toggle { checked: *checked }),
+            (
+                WidgetKind::Slider { enabled: true, .. },
+                LayoutKind::Slider { enabled: true, .. },
+            ) => Some(InteractiveTarget::Slider {
+                track_rect: lnode.content_rect,
+            }),
+            _ => None,
+        };
+    }
+
+    if let (
+        WidgetKind::Row { children, .. } | WidgetKind::Column { children, .. },
+        LayoutKind::Container {
+            children: layout_children,
+        },
+    ) = (&node.kind, &lnode.kind)
+    {
+        for (child_node, &child_idx) in children.iter().zip(layout_children.iter()) {
+            if let Some(found) =
+                find_interactive_recursive(child_node, child_idx, layout, target_id, depth + 1)
+            {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+/// Calcula el valor en [`Permille`] (`0..=1000`) correspondiente a la coordenada `x`
+/// sobre la pista horizontal `track_rect`, usando aritmética entera saturante y
+/// evitando cualquier división por cero cuando `track_rect.width == 0`.
+#[must_use]
+pub const fn slider_value_from_x(track_rect: Rect, x: i32) -> Permille {
+    if track_rect.width == 0 || x <= track_rect.x {
+        return Permille::ZERO;
+    }
+    let right = track_rect.right();
+    if x >= right {
+        return Permille::FULL;
+    }
+    let offset = x.abs_diff(track_rect.x) as u64;
+    let width = track_rect.width as u64;
+    let numer = offset.saturating_mul(1000).saturating_add(width / 2);
+    let raw = (numer / width) as u16;
+    Permille::new(raw)
+}
+
+/// Máquina de estados interactiva de `atoll-ui` (Capa 3).
+///
+/// Guarda por [`WidgetId`] qué widget está bajo el puntero (`hovered`), qué botón o
+/// interruptor capturó una presión activa (`captured_press`) y qué deslizador se está
+/// arrastrando (`dragging_slider`). No guarda referencias al árbol ni aloja memoria en el heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UiState {
+    hovered: Option<WidgetId>,
+    captured_press: Option<WidgetId>,
+    dragging_slider: Option<WidgetId>,
+}
+
+impl UiState {
+    /// Crea un estado interactivo vacío en reposo.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            hovered: None,
+            captured_press: None,
+            dragging_slider: None,
+        }
+    }
+
+    /// Devuelve el [`WidgetId`] que se encuentra actualmente en estado de hover.
+    #[must_use]
+    pub const fn hovered(&self) -> Option<WidgetId> {
+        self.hovered
+    }
+
+    /// Devuelve el [`WidgetId`] que se ve presionado en este instante.
+    ///
+    /// Un `Button` o `Toggle` capturado solo se ve presionado mientras el puntero
+    /// permanece dentro de ese mismo widget (`captured_press == hovered`). Si el
+    /// puntero sale sin soltar el botón izquierdo, `pressed()` pasa a `None` pero
+    /// [`UiState::captured_press`] conserva la captura hasta que se suelte.
+    #[must_use]
+    pub const fn pressed(&self) -> Option<WidgetId> {
+        match (self.captured_press, self.hovered) {
+            (Some(captured), Some(hovered)) if captured.0 == hovered.0 => Some(captured),
+            _ => None,
+        }
+    }
+
+    /// Devuelve el [`WidgetId`] del `Button` o `Toggle` que inició el gesto de presión actual,
+    /// aunque el puntero haya salido temporalmente del widget.
+    #[must_use]
+    pub const fn captured_press(&self) -> Option<WidgetId> {
+        self.captured_press
+    }
+
+    /// Devuelve el [`WidgetId`] del `Slider` que está siendo arrastrado actualmente.
+    #[must_use]
+    pub const fn dragging_slider(&self) -> Option<WidgetId> {
+        self.dragging_slider
+    }
+
+    /// Indica si `id` tiene actualmente el puntero encima (`hover`).
+    #[must_use]
+    pub const fn is_hovered(&self, id: WidgetId) -> bool {
+        if id.is_none() {
+            return false;
+        }
+        matches!(self.hovered, Some(h) if h.0 == id.0)
+    }
+
+    /// Indica si `id` se ve actualmente presionado (`Button` o `Toggle` con captura y puntero adentro).
+    #[must_use]
+    pub const fn is_pressed(&self, id: WidgetId) -> bool {
+        if id.is_none() {
+            return false;
+        }
+        matches!(self.pressed(), Some(p) if p.0 == id.0)
+    }
+
+    /// Indica si `id` es un `Slider` que está siendo arrastrado en este momento.
+    #[must_use]
+    pub const fn is_dragging(&self, id: WidgetId) -> bool {
+        if id.is_none() {
+            return false;
+        }
+        matches!(self.dragging_slider, Some(d) if d.0 == id.0)
+    }
+
+    /// Indica si `id` está visualmente activo (presionado dentro de sus límites o arrastrándose).
+    #[must_use]
+    pub const fn is_active(&self, id: WidgetId) -> bool {
+        self.is_pressed(id) || self.is_dragging(id)
+    }
+
+    /// Sincroniza el estado interactivo tras un cambio en el árbol o en su layout.
+    ///
+    /// Si algún [`WidgetId`] que estaba en `hovered`, `captured_press` o `dragging_slider`
+    /// dejó de existir en `(tree, layout)` o dejó de ser un widget interactivo habilitado
+    /// de su misma clase, limpia ese estado y devuelve `true` si hace falta redibujar.
+    pub fn sync(&mut self, tree: &Node, layout: &LayoutTree) -> bool {
+        let mut changed = false;
+
+        if let Some(id) = self.hovered {
+            if find_interactive_target(tree, layout, id).is_none() {
+                self.hovered = None;
+                changed = true;
+            }
+        }
+
+        if let Some(id) = self.captured_press {
+            let valid_press = matches!(
+                find_interactive_target(tree, layout, id),
+                Some(InteractiveTarget::Button | InteractiveTarget::Toggle { .. })
+            );
+            if !valid_press {
+                self.captured_press = None;
+                changed = true;
+            }
+        }
+
+        if let Some(id) = self.dragging_slider {
+            let valid_slider = matches!(
+                find_interactive_target(tree, layout, id),
+                Some(InteractiveTarget::Slider { .. })
+            );
+            if !valid_slider {
+                self.dragging_slider = None;
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// Procesa una entrada del puntero contra `tree` y `layout` sin mutar el árbol.
+    ///
+    /// Devuelve [`InteractionOutcome`] con `needs_redraw` exacto y los [`UiEvent`] emitidos.
+    #[must_use]
+    pub fn handle(
+        &mut self,
+        tree: &Node,
+        layout: &LayoutTree,
+        input: PointerInput,
+    ) -> InteractionOutcome {
+        let prev_hovered = self.hovered;
+        let prev_pressed_visual = self.pressed();
+        let prev_dragging = self.dragging_slider;
+
+        // Garantizamos que ningún id interno apunte a un nodo inexistente si el árbol cambió.
+        let _ = self.sync(tree, layout);
+
+        let mut events = Vec::new();
+
+        match input {
+            PointerInput::Move { x, y } => {
+                let hit = hit_test(tree, layout, x, y);
+                if let Some(slider_id) = self.dragging_slider {
+                    self.hovered = if hit == Some(slider_id) {
+                        Some(slider_id)
+                    } else {
+                        None
+                    };
+                    if let Some(InteractiveTarget::Slider { track_rect }) =
+                        find_interactive_target(tree, layout, slider_id)
+                    {
+                        let value = slider_value_from_x(track_rect, x);
+                        events.push(UiEvent::SliderChanged {
+                            id: slider_id,
+                            value,
+                        });
+                    }
+                } else if let Some(captured_id) = self.captured_press {
+                    // Mientras el gesto está capturado por un Button/Toggle, solo ese widget
+                    // puede recuperar el hover (y volver a verse presionado) al reingresar.
+                    self.hovered = if hit == Some(captured_id) {
+                        Some(captured_id)
+                    } else {
+                        None
+                    };
+                } else {
+                    self.hovered = hit;
+                }
+            }
+            PointerInput::Leave => {
+                // Al salir de la superficie se limpia el hover (un botón capturado deja de
+                // verse presionado, pero conserva `captured_press` y un slider conserva el arrastre).
+                self.hovered = None;
+            }
+            PointerInput::Down {
+                x,
+                y,
+                button: PointerButton::Left,
+            } => {
+                let hit = hit_test(tree, layout, x, y);
+                self.hovered = hit;
+                self.captured_press = None;
+                self.dragging_slider = None;
+
+                if let Some(id) = hit {
+                    match find_interactive_target(tree, layout, id) {
+                        Some(InteractiveTarget::Button | InteractiveTarget::Toggle { .. }) => {
+                            self.captured_press = Some(id);
+                        }
+                        Some(InteractiveTarget::Slider { track_rect }) => {
+                            self.dragging_slider = Some(id);
+                            let value = slider_value_from_x(track_rect, x);
+                            events.push(UiEvent::SliderChanged { id, value });
+                        }
+                        None => {}
+                    }
+                }
+            }
+            PointerInput::Up {
+                x,
+                y,
+                button: PointerButton::Left,
+            } => {
+                let hit = hit_test(tree, layout, x, y);
+                let was_captured = self.captured_press.take();
+                let was_dragging = self.dragging_slider.take();
+                self.hovered = hit;
+
+                if was_dragging.is_none() {
+                    if let Some(captured_id) = was_captured {
+                        if hit == Some(captured_id) {
+                            match find_interactive_target(tree, layout, captured_id) {
+                                Some(InteractiveTarget::Button) => {
+                                    events.push(UiEvent::Clicked(captured_id));
+                                }
+                                Some(InteractiveTarget::Toggle { checked }) => {
+                                    events.push(UiEvent::Toggled {
+                                        id: captured_id,
+                                        checked: !checked,
+                                    });
+                                }
+                                Some(InteractiveTarget::Slider { .. }) | None => {}
+                            }
+                        }
+                    }
+                }
+            }
+            PointerInput::Down {
+                button: PointerButton::Right | PointerButton::Middle | PointerButton::Other(_),
+                ..
+            }
+            | PointerInput::Up {
+                button: PointerButton::Right | PointerButton::Middle | PointerButton::Other(_),
+                ..
+            }
+            | PointerInput::Wheel { .. } => {
+                // Solo el botón izquierdo interactúa; los demás botones y la rueda se ignoran.
+            }
+        }
+
+        let needs_redraw = self.hovered != prev_hovered
+            || self.pressed() != prev_pressed_visual
+            || self.dragging_slider != prev_dragging
+            || !events.is_empty();
+
+        InteractionOutcome {
+            needs_redraw,
+            events,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
 
     use super::{
-        compute_layout, validate_tree, ButtonVariant, CrossAlign, Edges, IconId, LayoutKind,
-        Length, MainAlign, Node, Permille, Rect, Size, TextMeasurer, Tone, TreeError, WidgetId,
-        WidgetKind, MAX_LOGICAL_PX, MAX_TREE_DEPTH, MAX_TREE_NODES,
+        compute_layout, find_interactive_target, hit_test, slider_value_from_x, validate_tree,
+        ButtonVariant, CrossAlign, Edges, IconId, InteractionOutcome, LayoutKind, Length,
+        MainAlign, Node, Permille, PointerButton, PointerInput, Rect, Size, TextMeasurer, Tone,
+        TreeError, UiEvent, UiState, WidgetId, WidgetKind, MAX_LOGICAL_PX, MAX_TREE_DEPTH,
+        MAX_TREE_NODES,
     };
 
     /// Medidor de texto falso y determinista para tests en cualquier SO:
@@ -2054,15 +2721,15 @@ mod tests {
                     label: Some("ok".to_owned()),
                     icon: Some(IconId::Check),
                     variant: ButtonVariant::Secondary,
-                    enabled: true,
+                    enabled: (self.next_u32() & 3) != 0,
                 },
                 4 => WidgetKind::Toggle {
                     checked: (self.next_u32() & 1) == 0,
-                    enabled: true,
+                    enabled: (self.next_u32() & 3) != 0,
                 },
                 5 => WidgetKind::Slider {
                     value: Permille::new(self.range_u16(0, 1000)),
-                    enabled: true,
+                    enabled: (self.next_u32() & 3) != 0,
                 },
                 6 => WidgetKind::Progress {
                     value: Permille::new(self.range_u16(0, 1000)),
@@ -2155,6 +2822,734 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn hit_testing_exact_edges_and_interactive_targets() {
+        let mut measurer = FakeMeasurer;
+
+        // Árbol con los 4 tipos interactivos habilitados (Button, IconButton, Toggle, Slider),
+        // más todos los tipos no interactivos (Label, Icon, Spacer, Divider, ProgressBar, Box)
+        // con WidgetId distinto de cero y widgets interactivos deshabilitados.
+        let tree = Node::column(
+            0,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![
+                // 1: Button en (0, 0, 50, 20)
+                Node::button(
+                    WidgetId::new(1),
+                    Some("Btn".to_owned()),
+                    None,
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(50, 20),
+                // 2: IconButton en (0, 20, 30, 20)
+                Node::icon_button(WidgetId::new(2), IconId::Play, ButtonVariant::Ghost, true)
+                    .with_fixed_size(30, 20),
+                // 3: Toggle en (0, 40, 36, 20)
+                Node::toggle(WidgetId::new(3), false, true).with_fixed_size(36, 20),
+                // 4: Slider en (0, 60, 80, 20)
+                Node::slider(WidgetId::new(4), Permille::new(500), true).with_fixed_size(80, 20),
+                // 5..9: Widgets NO interactivos aunque tengan WidgetId != 0
+                Node::label("Texto", 14, Tone::Primary)
+                    .with_id(WidgetId::new(5))
+                    .with_fixed_size(50, 20),
+                Node::icon(IconId::Settings, 16, Tone::Accent)
+                    .with_id(WidgetId::new(6))
+                    .with_fixed_size(50, 20),
+                Node::spacer_fixed(50, 20).with_id(WidgetId::new(7)),
+                Node::divider(2)
+                    .with_id(WidgetId::new(8))
+                    .with_fixed_size(50, 20),
+                Node::progress_bar(Permille::new(400), Tone::Accent)
+                    .with_id(WidgetId::new(9))
+                    .with_fixed_size(50, 20),
+                // 10..12: Widgets interactivos pero deshabilitados (`enabled: false`)
+                Node::button(
+                    WidgetId::new(10),
+                    Some("Off".to_owned()),
+                    None,
+                    ButtonVariant::Secondary,
+                    false,
+                )
+                .with_fixed_size(50, 20),
+                Node::toggle(WidgetId::new(11), true, false).with_fixed_size(50, 20),
+                Node::slider(WidgetId::new(12), Permille::new(200), false).with_fixed_size(50, 20),
+            ],
+        )
+        .with_id(WidgetId::new(99))
+        .with_fixed_size(100, 300);
+
+        let layout =
+            compute_layout(&tree, Size::new(100, 300), 1.0, &mut measurer).expect("layout");
+
+        // Bordes exactos de Button (0, 0, 50, 20):
+        // Inclusivo a izquierda (0) y arriba (0); exclusivo a derecha (50) y abajo (20).
+        assert_eq!(hit_test(&tree, &layout, 0, 0), Some(WidgetId::new(1)));
+        assert_eq!(hit_test(&tree, &layout, 49, 0), Some(WidgetId::new(1)));
+        assert_eq!(hit_test(&tree, &layout, 0, 19), Some(WidgetId::new(1)));
+        assert_eq!(hit_test(&tree, &layout, 49, 19), Some(WidgetId::new(1)));
+        assert_eq!(hit_test(&tree, &layout, -1, 0), None);
+        assert_eq!(hit_test(&tree, &layout, 0, -1), None);
+        assert_eq!(hit_test(&tree, &layout, 50, 0), None);
+        assert_eq!(hit_test(&tree, &layout, 50, 19), None);
+
+        // En y = 20 empieza el IconButton (id = 2, 0..30 x 20..40).
+        assert_eq!(hit_test(&tree, &layout, 0, 20), Some(WidgetId::new(2)));
+        assert_eq!(hit_test(&tree, &layout, 29, 39), Some(WidgetId::new(2)));
+        assert_eq!(hit_test(&tree, &layout, 30, 20), None);
+
+        // En y = 40 empieza el Toggle (id = 3, 0..36 x 40..60).
+        assert_eq!(hit_test(&tree, &layout, 0, 40), Some(WidgetId::new(3)));
+        assert_eq!(hit_test(&tree, &layout, 35, 59), Some(WidgetId::new(3)));
+        assert_eq!(hit_test(&tree, &layout, 36, 40), None);
+
+        // En y = 60 empieza el Slider (id = 4, 0..80 x 60..80).
+        assert_eq!(hit_test(&tree, &layout, 0, 60), Some(WidgetId::new(4)));
+        assert_eq!(hit_test(&tree, &layout, 79, 79), Some(WidgetId::new(4)));
+        assert_eq!(hit_test(&tree, &layout, 80, 60), None);
+
+        // Ninguno de los nodos no interactivos (y = 80..180), deshabilitados (y = 180..240)
+        // ni el contenedor raíz (id = 99) captura jamás el puntero.
+        for y in 80..300 {
+            assert_eq!(
+                hit_test(&tree, &layout, 10, y),
+                None,
+                "en y={y} ningún nodo no interactivo ni deshabilitado debe capturar el puntero"
+            );
+        }
+    }
+
+    #[test]
+    fn hit_testing_overlap_and_clipped_children() {
+        let mut measurer = FakeMeasurer;
+
+        // 1. Solapamiento: tres hijos en un Row. Forzamos rectángulos solapados en `layout`:
+        // - Hijo 1 (Button id=1): (10, 10, 60, 30) -> [10..70, 10..40)
+        // - Hijo 2 (Button id=2): (40, 10, 60, 30) -> [40..100, 10..40) (se dibuja encima de 1 en 40..70)
+        // - Hijo 3 (Label no interactivo id=3): (50, 10, 40, 30) -> no captura, deja pasar a 2.
+        let overlap_tree = Node::row(
+            0,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![
+                Node::button(
+                    WidgetId::new(1),
+                    Some("A".to_owned()),
+                    None,
+                    ButtonVariant::Secondary,
+                    true,
+                )
+                .with_fixed_size(60, 30),
+                Node::button(
+                    WidgetId::new(2),
+                    Some("B".to_owned()),
+                    None,
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(60, 30),
+                Node::label("Encima", 14, Tone::Primary)
+                    .with_id(WidgetId::new(3))
+                    .with_fixed_size(40, 30),
+            ],
+        )
+        .with_fixed_size(120, 50);
+
+        let mut overlap_layout =
+            compute_layout(&overlap_tree, Size::new(120, 50), 1.0, &mut measurer).expect("layout");
+        overlap_layout.nodes[1].rect = Rect::new(10, 10, 60, 30);
+        overlap_layout.nodes[2].rect = Rect::new(40, 10, 60, 30);
+        overlap_layout.nodes[3].rect = Rect::new(50, 10, 40, 30);
+
+        // Zona exclusiva de 1: (25, 20) -> gana 1.
+        assert_eq!(
+            hit_test(&overlap_tree, &overlap_layout, 25, 20),
+            Some(WidgetId::new(1))
+        );
+        // Zona donde 1 y 2 se solapan (40..70): gana el último hijo interactivo (2),
+        // e ignora el Label 3 que está encima en (55, 20).
+        assert_eq!(
+            hit_test(&overlap_tree, &overlap_layout, 40, 20),
+            Some(WidgetId::new(2))
+        );
+        assert_eq!(
+            hit_test(&overlap_tree, &overlap_layout, 55, 20),
+            Some(WidgetId::new(2))
+        );
+        assert_eq!(
+            hit_test(&overlap_tree, &overlap_layout, 69, 20),
+            Some(WidgetId::new(2))
+        );
+        // Zona exclusiva de 2: (85, 20) -> gana 2.
+        assert_eq!(
+            hit_test(&overlap_tree, &overlap_layout, 85, 20),
+            Some(WidgetId::new(2))
+        );
+
+        // 2. Hijos recortados por el `content_rect` de su padre:
+        // Contenedor de 100x40 con padding 10 en todos los lados -> content_rect = (10, 10, 80, 20).
+        // Adentro hay un Button Fixed de 120x30 (que `compute_layout` recorta a (10, 10, 80, 20)).
+        let clipped_tree = Node::box_container(
+            Edges::all(10),
+            vec![Node::button(
+                WidgetId::new(7),
+                Some("Ancho".to_owned()),
+                None,
+                ButtonVariant::Primary,
+                true,
+            )
+            .with_fixed_size(120, 30)],
+        )
+        .with_fixed_size(100, 40);
+
+        let mut clipped_layout =
+            compute_layout(&clipped_tree, Size::new(100, 40), 1.0, &mut measurer).expect("layout");
+        assert_eq!(
+            clipped_layout.nodes[0].content_rect,
+            Rect::new(10, 10, 80, 20)
+        );
+
+        // Incluso si el rectángulo del hijo en LayoutTree desbordara el `content_rect` del padre,
+        // `hit_test` lo recorta contra el `content_rect` del padre (10..90 x 10..30).
+        clipped_layout.nodes[1].rect = Rect::new(0, 0, 120, 40);
+        assert_eq!(
+            hit_test(&clipped_tree, &clipped_layout, 10, 10),
+            Some(WidgetId::new(7))
+        );
+        assert_eq!(
+            hit_test(&clipped_tree, &clipped_layout, 89, 29),
+            Some(WidgetId::new(7))
+        );
+        // Fuera del `content_rect` del padre (en la zona de padding 0..10 o 90..100): no responde.
+        assert_eq!(hit_test(&clipped_tree, &clipped_layout, 5, 15), None);
+        assert_eq!(hit_test(&clipped_tree, &clipped_layout, 90, 15), None);
+        assert_eq!(hit_test(&clipped_tree, &clipped_layout, 50, 5), None);
+        assert_eq!(hit_test(&clipped_tree, &clipped_layout, 50, 30), None);
+    }
+
+    #[test]
+    fn button_and_icon_button_click_capture_leave_reenter_and_exact_redraw() {
+        let mut measurer = FakeMeasurer;
+        let btn_a = WidgetId::new(1);
+        let btn_b = WidgetId::new(2);
+
+        // Row con Button A en (0, 0, 50, 28) e IconButton B en (60, 0, 28, 28).
+        let tree = Node::row(
+            10,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![
+                Node::button(
+                    btn_a,
+                    Some("A".to_owned()),
+                    None,
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(50, 28),
+                Node::icon_button(btn_b, IconId::Play, ButtonVariant::Ghost, true)
+                    .with_fixed_size(28, 28),
+            ],
+        )
+        .with_fixed_size(200, 40);
+
+        let layout = compute_layout(&tree, Size::new(200, 40), 1.0, &mut measurer).expect("layout");
+        let mut state = UiState::new();
+
+        // 1. Moverse por zona vacía (150, 10) -> no cambia nada, needs_redraw = false.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(150, 10));
+        assert!(!out.needs_redraw);
+        assert!(out.events.is_empty());
+        assert_eq!(state.hovered(), None);
+
+        // 2. Entrar a Button A (10, 10) -> cambia hover, needs_redraw = true.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(10, 10));
+        assert!(out.needs_redraw);
+        assert_eq!(state.hovered(), Some(btn_a));
+        assert!(state.is_hovered(btn_a));
+        assert!(!state.is_pressed(btn_a));
+
+        // 3. Moverse dentro del mismo Button A (20, 15) -> needs_redraw = false.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(20, 15));
+        assert!(!out.needs_redraw);
+        assert!(out.events.is_empty());
+
+        // 4. Presionar botón izquierdo adentro de Button A -> pasa a verse presionado, needs_redraw = true.
+        let out = state.handle(&tree, &layout, PointerInput::left_down(20, 15));
+        assert!(out.needs_redraw);
+        assert!(out.events.is_empty());
+        assert_eq!(state.pressed(), Some(btn_a));
+        assert_eq!(state.captured_press(), Some(btn_a));
+        assert!(state.is_pressed(btn_a));
+        assert!(state.is_active(btn_a));
+
+        // 5. Moverse adentro mientras está presionado -> needs_redraw = false.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(25, 15));
+        assert!(!out.needs_redraw);
+        assert!(state.is_pressed(btn_a));
+
+        // 6. Salir de Button A mientras sigue presionado -> deja de verse presionado,
+        // pero el gesto sigue capturado (`captured_press == Some(btn_a)`). needs_redraw = true.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(150, 15));
+        assert!(out.needs_redraw);
+        assert!(out.events.is_empty());
+        assert!(!state.is_pressed(btn_a));
+        assert_eq!(state.pressed(), None);
+        assert_eq!(state.hovered(), None);
+        assert_eq!(state.captured_press(), Some(btn_a));
+
+        // 7. Moverse afuera (incluso pasando por encima de IconButton B en x=70) mientras
+        // el gesto sigue capturado por A -> no cambia ningún estado visual, needs_redraw = false.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(70, 15));
+        assert!(!out.needs_redraw);
+        assert_eq!(state.hovered(), None);
+        assert!(!state.is_pressed(btn_a));
+
+        // 8. Volver a entrar a Button A sin haber soltado -> vuelve a verse presionado, needs_redraw = true.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(30, 15));
+        assert!(out.needs_redraw);
+        assert!(state.is_pressed(btn_a));
+        assert_eq!(state.pressed(), Some(btn_a));
+        assert_eq!(state.hovered(), Some(btn_a));
+
+        // 9. Soltar adentro de Button A -> emite Clicked(btn_a), limpia presión, needs_redraw = true.
+        let out = state.handle(&tree, &layout, PointerInput::left_up(30, 15));
+        assert!(out.needs_redraw);
+        assert_eq!(out.events, vec![UiEvent::Clicked(btn_a)]);
+        assert!(!state.is_pressed(btn_a));
+        assert_eq!(state.captured_press(), None);
+        assert_eq!(state.hovered(), Some(btn_a));
+
+        // 10. Presionar adentro de IconButton B (65, 10), salir con Leave y soltar afuera:
+        // al soltar afuera no hay clic y como ya había dejado de verse presionado al salir,
+        // soltar en vacío no pide redibujar.
+        let out = state.handle(&tree, &layout, PointerInput::left_down(65, 10));
+        assert!(out.needs_redraw);
+        assert!(state.is_pressed(btn_b));
+
+        let out = state.handle(&tree, &layout, PointerInput::Leave);
+        assert!(out.needs_redraw);
+        assert!(!state.is_pressed(btn_b));
+        assert_eq!(state.captured_press(), Some(btn_b));
+
+        let out = state.handle(&tree, &layout, PointerInput::left_up(180, 10));
+        assert!(!out.needs_redraw);
+        assert!(out.events.is_empty());
+        assert_eq!(state.captured_press(), None);
+    }
+
+    #[test]
+    fn toggle_interaction_emits_event_without_mutating_tree() {
+        let mut measurer = FakeMeasurer;
+        let toggle_id = WidgetId::new(10);
+
+        let tree_off = Node::toggle(toggle_id, false, true).with_fixed_size(36, 20);
+        let layout_off =
+            compute_layout(&tree_off, Size::new(100, 40), 1.0, &mut measurer).expect("layout");
+        let mut state = UiState::new();
+
+        // Presionar sobre el Toggle -> captura sin emitir evento todavía.
+        let out = state.handle(&tree_off, &layout_off, PointerInput::left_down(10, 10));
+        assert!(out.needs_redraw);
+        assert!(out.events.is_empty());
+        assert!(state.is_pressed(toggle_id));
+
+        // Salir y volver a entrar conserva la captura.
+        let out = state.handle(&tree_off, &layout_off, PointerInput::move_to(80, 10));
+        assert!(out.needs_redraw);
+        assert!(!state.is_pressed(toggle_id));
+
+        let out = state.handle(&tree_off, &layout_off, PointerInput::move_to(15, 10));
+        assert!(out.needs_redraw);
+        assert!(state.is_pressed(toggle_id));
+
+        // Soltar adentro -> emite Toggled { id, checked: true } sin mutar `tree_off`.
+        let out = state.handle(&tree_off, &layout_off, PointerInput::left_up(15, 10));
+        assert!(out.needs_redraw);
+        assert_eq!(
+            out.events,
+            vec![UiEvent::Toggled {
+                id: toggle_id,
+                checked: true,
+            }]
+        );
+        assert_eq!(
+            tree_off.kind,
+            WidgetKind::Toggle {
+                checked: false,
+                enabled: true,
+            },
+            "el toolkit nunca modifica el árbol de la aplicación"
+        );
+
+        // La aplicación actualiza su árbol a `checked: true`, recalcula layout y llama a `sync`.
+        let tree_on = Node::toggle(toggle_id, true, true).with_fixed_size(36, 20);
+        let layout_on =
+            compute_layout(&tree_on, Size::new(100, 40), 1.0, &mut measurer).expect("layout");
+        assert!(!state.sync(&tree_on, &layout_on));
+
+        // Un nuevo clic sobre `tree_on` pide cambiar a `false`.
+        let _ = state.handle(&tree_on, &layout_on, PointerInput::left_down(15, 10));
+        let out = state.handle(&tree_on, &layout_on, PointerInput::left_up(15, 10));
+        assert_eq!(
+            out.events,
+            vec![UiEvent::Toggled {
+                id: toggle_id,
+                checked: false,
+            }]
+        );
+
+        // Presionar adentro y soltar afuera no emite Toggled.
+        let _ = state.handle(&tree_on, &layout_on, PointerInput::left_down(15, 10));
+        let out = state.handle(&tree_on, &layout_on, PointerInput::left_up(90, 10));
+        assert!(out.events.is_empty());
+    }
+
+    #[test]
+    fn slider_drag_clamps_out_of_bounds_and_handles_zero_width_track() {
+        let mut measurer = FakeMeasurer;
+        let slider_id = WidgetId::new(20);
+
+        // Slider en (10, 5, 100, 20) dentro de un contenedor con padding.
+        let tree = Node::box_container(
+            Edges::new(5, 10, 5, 10),
+            vec![Node::slider(slider_id, Permille::new(0), true).with_fixed_size(100, 20)],
+        )
+        .with_fixed_size(120, 30);
+
+        let layout = compute_layout(&tree, Size::new(120, 30), 1.0, &mut measurer).expect("layout");
+        let mut state = UiState::new();
+
+        // 1. Presionar en x = 35 (25 px desde el inicio de la pista en x = 10 -> 250 permille).
+        let out = state.handle(&tree, &layout, PointerInput::left_down(35, 15));
+        assert!(out.needs_redraw);
+        assert!(state.is_dragging(slider_id));
+        assert!(state.is_active(slider_id));
+        assert_eq!(
+            out.events,
+            vec![UiEvent::SliderChanged {
+                id: slider_id,
+                value: Permille::new(250),
+            }]
+        );
+
+        // 2. Arrastrar a x = 74 (64 px desde x = 10 -> 640 permille), incluso saliendo en Y (y = 200).
+        let out = state.handle(&tree, &layout, PointerInput::move_to(74, 200));
+        assert!(out.needs_redraw);
+        assert!(state.is_dragging(slider_id));
+        assert_eq!(
+            out.events,
+            vec![UiEvent::SliderChanged {
+                id: slider_id,
+                value: Permille::new(640),
+            }]
+        );
+
+        // 3. Arrastrar mucho más a la izquierda de la pista (x = -500) -> acotado a 0 permille.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(-500, -50));
+        assert!(out.needs_redraw);
+        assert!(state.is_dragging(slider_id));
+        assert_eq!(
+            out.events,
+            vec![UiEvent::SliderChanged {
+                id: slider_id,
+                value: Permille::ZERO,
+            }]
+        );
+
+        // 4. Arrastrar mucho más a la derecha de la pista (x = 5000) -> acotado a 1000 permille.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(5000, 500));
+        assert!(out.needs_redraw);
+        assert!(state.is_dragging(slider_id));
+        assert_eq!(
+            out.events,
+            vec![UiEvent::SliderChanged {
+                id: slider_id,
+                value: Permille::FULL,
+            }]
+        );
+
+        // 5. Soltar termina el arrastre.
+        let out = state.handle(&tree, &layout, PointerInput::left_up(5000, 500));
+        assert!(out.needs_redraw);
+        assert!(!state.is_dragging(slider_id));
+        assert!(out.events.is_empty());
+
+        // Moverse después de soltar ya no emite SliderChanged.
+        let out = state.handle(&tree, &layout, PointerInput::move_to(50, 15));
+        assert!(out.events.is_empty());
+
+        // 6. Pista de ancho cero (`track_rect.width == 0`): no divide por cero nunca.
+        assert_eq!(
+            slider_value_from_x(Rect::new(10, 0, 0, 20), 50),
+            Permille::ZERO
+        );
+        let zero_track_tree = Node::slider(slider_id, Permille::new(500), true)
+            .with_fixed_size(20, 20)
+            .with_padding(Edges::symmetric(10, 0));
+        let zero_track_layout =
+            compute_layout(&zero_track_tree, Size::new(20, 20), 1.0, &mut measurer)
+                .expect("layout");
+        assert_eq!(zero_track_layout.nodes[0].content_rect.width, 0);
+
+        let out = state.handle(
+            &zero_track_tree,
+            &zero_track_layout,
+            PointerInput::left_down(5, 10),
+        );
+        assert_eq!(
+            out.events,
+            vec![UiEvent::SliderChanged {
+                id: slider_id,
+                value: Permille::ZERO,
+            }]
+        );
+    }
+
+    #[test]
+    fn non_left_buttons_and_wheel_are_ignored_in_all_states() {
+        let mut measurer = FakeMeasurer;
+        let btn_id = WidgetId::new(1);
+        let tree = Node::button(
+            btn_id,
+            Some("Test".to_owned()),
+            None,
+            ButtonVariant::Primary,
+            true,
+        )
+        .with_fixed_size(60, 28);
+        let layout = compute_layout(&tree, Size::new(100, 40), 1.0, &mut measurer).expect("layout");
+        let mut state = UiState::new();
+
+        for button in [
+            PointerButton::Right,
+            PointerButton::Middle,
+            PointerButton::Other(4),
+        ] {
+            let down = state.handle(&tree, &layout, PointerInput::button_down(10, 10, button));
+            assert_eq!(down, InteractionOutcome::NONE);
+            assert_eq!(state, UiState::new());
+
+            let up = state.handle(&tree, &layout, PointerInput::button_up(10, 10, button));
+            assert_eq!(up, InteractionOutcome::NONE);
+            assert_eq!(state, UiState::new());
+        }
+
+        let wheel = state.handle(&tree, &layout, PointerInput::wheel(10, 10, 0, 120));
+        assert_eq!(wheel, InteractionOutcome::NONE);
+        assert_eq!(state, UiState::new());
+
+        // Incluso con el botón izquierdo presionado, clic derecho/central o rueda no alteran la captura.
+        let _ = state.handle(&tree, &layout, PointerInput::left_down(10, 10));
+        let snapshot = state;
+        assert_eq!(
+            state.handle(
+                &tree,
+                &layout,
+                PointerInput::button_down(10, 10, PointerButton::Right)
+            ),
+            InteractionOutcome::NONE
+        );
+        assert_eq!(
+            state.handle(
+                &tree,
+                &layout,
+                PointerInput::button_up(10, 10, PointerButton::Right)
+            ),
+            InteractionOutcome::NONE
+        );
+        assert_eq!(
+            state.handle(&tree, &layout, PointerInput::wheel(10, 10, 0, -120)),
+            InteractionOutcome::NONE
+        );
+        assert_eq!(state, snapshot);
+    }
+
+    #[test]
+    fn sync_cleans_up_removed_or_disabled_widgets_and_reports_redraw() {
+        let mut measurer = FakeMeasurer;
+        let btn_id = WidgetId::new(1);
+        let slider_id = WidgetId::new(2);
+
+        let tree_initial = Node::row(
+            8,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![
+                Node::button(
+                    btn_id,
+                    Some("Btn".to_owned()),
+                    None,
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(50, 28),
+                Node::slider(slider_id, Permille::new(300), true).with_fixed_size(80, 20),
+            ],
+        )
+        .with_fixed_size(200, 40);
+        let layout_initial =
+            compute_layout(&tree_initial, Size::new(200, 40), 1.0, &mut measurer).expect("layout");
+
+        // Caso 1: el botón está presionado y desaparece del árbol.
+        let mut state = UiState::new();
+        let _ = state.handle(
+            &tree_initial,
+            &layout_initial,
+            PointerInput::left_down(10, 10),
+        );
+        assert!(state.is_pressed(btn_id));
+
+        let tree_without_btn = Node::row(
+            8,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![Node::slider(slider_id, Permille::new(300), true).with_fixed_size(80, 20)],
+        )
+        .with_fixed_size(200, 40);
+        let layout_without_btn =
+            compute_layout(&tree_without_btn, Size::new(200, 40), 1.0, &mut measurer)
+                .expect("layout");
+
+        assert!(
+            state.sync(&tree_without_btn, &layout_without_btn),
+            "sync debe devolver true al limpiar el widget presionado que desapareció"
+        );
+        assert_eq!(state.hovered(), None);
+        assert_eq!(state.pressed(), None);
+        assert_eq!(state.captured_press(), None);
+        assert!(
+            !state.sync(&tree_without_btn, &layout_without_btn),
+            "una segunda llamada a sync sin cambios devuelve false"
+        );
+
+        // Caso 2: el slider se está arrastrando y pasa a `enabled: false`.
+        let _ = state.handle(
+            &tree_initial,
+            &layout_initial,
+            PointerInput::left_down(70, 10),
+        );
+        assert!(state.is_dragging(slider_id));
+
+        let tree_disabled_slider = Node::row(
+            8,
+            MainAlign::Start,
+            CrossAlign::Start,
+            vec![
+                Node::button(
+                    btn_id,
+                    Some("Btn".to_owned()),
+                    None,
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(50, 28),
+                Node::slider(slider_id, Permille::new(300), false).with_fixed_size(80, 20),
+            ],
+        )
+        .with_fixed_size(200, 40);
+        let layout_disabled_slider = compute_layout(
+            &tree_disabled_slider,
+            Size::new(200, 40),
+            1.0,
+            &mut measurer,
+        )
+        .expect("layout");
+
+        assert!(state.sync(&tree_disabled_slider, &layout_disabled_slider));
+        assert!(!state.is_dragging(slider_id));
+        assert_eq!(state.hovered(), None);
+    }
+
+    #[test]
+    fn interaction_is_deterministic_and_random_sequences_preserve_invariants() {
+        let mut measurer = FakeMeasurer;
+        let mut prng = Prng::new(0xA701_14B0_2026_1114);
+
+        for trial in 0..150 {
+            let mut next_id = 0;
+            let tree = prng.gen_tree(1, &mut next_id);
+            let avail = Size::new(
+                u32::from(prng.range_u16(0, 400)),
+                u32::from(prng.range_u16(0, 200)),
+            );
+            let layout = compute_layout(&tree, avail, 1.0, &mut measurer).expect("layout válido");
+
+            let mut state_a = UiState::new();
+            let mut state_b = UiState::new();
+
+            for step in 0..60 {
+                let x = i32::from(prng.range_u16(0, 450)) - 25;
+                let y = i32::from(prng.range_u16(0, 250)) - 25;
+                let input = match prng.next_u32() % 7 {
+                    0 | 1 => PointerInput::move_to(x, y),
+                    2 => PointerInput::left_down(x, y),
+                    3 => PointerInput::left_up(x, y),
+                    4 => PointerInput::Leave,
+                    5 => PointerInput::button_down(x, y, PointerButton::Right),
+                    _ => PointerInput::wheel(x, y, 0, 120),
+                };
+
+                let out_a = state_a.handle(&tree, &layout, input);
+                let out_b = state_b.handle(&tree, &layout, input);
+
+                // Determinismo exacto entre dos corridas idénticas.
+                assert_eq!(
+                    state_a, state_b,
+                    "trial {trial} step {step}: UiState difiere"
+                );
+                assert_eq!(
+                    out_a, out_b,
+                    "trial {trial} step {step}: InteractionOutcome difiere"
+                );
+
+                // Invariante: todo WidgetId activo en `UiState` existe y es un widget interactivo habilitado.
+                for active_id in [
+                    state_a.hovered(),
+                    state_a.pressed(),
+                    state_a.captured_press(),
+                    state_a.dragging_slider(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    assert!(
+                        !active_id.is_none(),
+                        "trial {trial} step {step}: WidgetId::NONE nunca puede quedar guardado"
+                    );
+                    assert!(
+                        find_interactive_target(&tree, &layout, active_id).is_some(),
+                        "trial {trial} step {step}: el id {:?} en UiState no existe o no es interactivo habilitado",
+                        active_id
+                    );
+                }
+            }
+
+            // Si el árbol cambia a otro árbol aleatorio y llamamos a `sync`, los ids siguen siendo válidos.
+            let mut next_id_2 = 0;
+            let tree_2 = prng.gen_tree(1, &mut next_id_2);
+            let layout_2 =
+                compute_layout(&tree_2, avail, 1.0, &mut measurer).expect("layout_2 válido");
+            let _ = state_a.sync(&tree_2, &layout_2);
+            for active_id in [
+                state_a.hovered(),
+                state_a.pressed(),
+                state_a.captured_press(),
+                state_a.dragging_slider(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                assert!(
+                    find_interactive_target(&tree_2, &layout_2, active_id).is_some(),
+                    "trial {trial}: tras sync quedó un id inválido {:?}",
+                    active_id
+                );
             }
         }
     }
