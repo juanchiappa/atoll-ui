@@ -59,7 +59,7 @@
   - Se re-sincroniza ante `WM_TIMECHANGE` (el usuario o NTP cambió la hora) y al volver de suspensión (`WM_POWERBROADCAST` con `PBT_APMRESUMEAUTOMATIC` o `PBT_APMRESUMESUSPEND`), porque ahí el timer pudo quedar desfasado.
   - Mientras dura la animación de hover, cada cuadro lee la hora actual, así que el texto siempre está al día. La fecha aparece con un fundido ligado al tamaño de la isla, y la hora se mueve de centrada a bloque superior en el mismo recorrido.
 
-- **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 87 glifos, 8,8 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
+- **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 222 glifos, 18,0 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
 
 ## Fases
 1. Isla dinámica en Windows (v0.1: reloj, DPI, configuración/temas y comportamiento 12a), midiendo RAM y CPU desde el primer commit.

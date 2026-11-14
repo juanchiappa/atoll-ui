@@ -28,7 +28,7 @@ Regla del proyecto: cada crate nuevo se justifica por escrito acá, en el mismo 
 - **Licencias:** `fontdue` MIT OR Apache-2.0 OR Zlib; `ttf-parser` MIT OR Apache-2.0; `core_maths` MIT; `libm` MIT. Todas compatibles con Apache-2.0, ninguna GPL/AGPL.
 - **MSRV:** `ttf-parser` 1.63 y `libm` 1.63; `fontdue` y `core_maths` no declaran, y compilan con 1.88+ (el proyecto exige 1.88). Solo `libm` tiene `build.rs`.
 - **Costo de RAM medido (Linux, build release con el perfil del workspace):** +252 KB al crear el `TextRenderer` (carga de la fuente embebida) y +4 a 8 KB al dibujar la hora y la fecha (13 glifos en caché). Total aproximado: < 0,3 MB, manteniendo el proceso en Windows dentro del presupuesto de ~7-8 MB en reposo.
-- **Fuente embebida:** Inter Medium recortada a 87 glifos, 8,8 KB en el binario. Origen y licencia en `docs/FONTS.md` y `THIRD_PARTY_NOTICES.md`.
+- **Fuente embebida:** Inter Medium recortada a 222 glifos, 18,0 KB en el binario. Origen y licencia en `docs/FONTS.md` y `THIRD_PARTY_NOTICES.md`.
 
 ### Alternativas descartadas (comparación)
 

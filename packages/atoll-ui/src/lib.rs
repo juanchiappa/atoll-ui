@@ -520,46 +520,73 @@ const ICON_VOLUME_MUTE_COMMANDS: &[PathCmd] = &[
 ];
 
 const ICON_SETTINGS_COMMANDS: &[PathCmd] = &[
-    PathCmd::MoveTo { x: 12, y: 4 },
-    PathCmd::LineTo { x: 12, y: 7 },
-    PathCmd::MoveTo { x: 12, y: 17 },
-    PathCmd::LineTo { x: 12, y: 20 },
-    PathCmd::MoveTo { x: 4, y: 12 },
-    PathCmd::LineTo { x: 7, y: 12 },
-    PathCmd::MoveTo { x: 17, y: 12 },
-    PathCmd::LineTo { x: 20, y: 12 },
-    PathCmd::MoveTo { x: 6, y: 6 },
-    PathCmd::LineTo { x: 8, y: 8 },
-    PathCmd::MoveTo { x: 16, y: 16 },
-    PathCmd::LineTo { x: 18, y: 18 },
-    PathCmd::MoveTo { x: 18, y: 6 },
-    PathCmd::LineTo { x: 16, y: 8 },
-    PathCmd::MoveTo { x: 8, y: 16 },
-    PathCmd::LineTo { x: 6, y: 18 },
-    PathCmd::MoveTo { x: 12, y: 8 },
-    PathCmd::QuadTo {
-        cx: 16,
-        cy: 8,
-        x: 16,
+    // Contorno exterior del engranaje con 8 dientes y valles intermedios.
+    PathCmd::MoveTo { x: 11, y: 2 },
+    PathCmd::LineTo { x: 13, y: 2 },
+    PathCmd::LineTo { x: 14, y: 5 },
+    PathCmd::LineTo { x: 16, y: 6 },
+    PathCmd::LineTo { x: 18, y: 4 },
+    PathCmd::LineTo { x: 20, y: 6 },
+    PathCmd::LineTo { x: 18, y: 8 },
+    PathCmd::LineTo { x: 19, y: 10 },
+    PathCmd::LineTo { x: 22, y: 11 },
+    PathCmd::LineTo { x: 22, y: 13 },
+    PathCmd::LineTo { x: 19, y: 14 },
+    PathCmd::LineTo { x: 18, y: 16 },
+    PathCmd::LineTo { x: 20, y: 18 },
+    PathCmd::LineTo { x: 18, y: 20 },
+    PathCmd::LineTo { x: 16, y: 18 },
+    PathCmd::LineTo { x: 14, y: 19 },
+    PathCmd::LineTo { x: 13, y: 22 },
+    PathCmd::LineTo { x: 11, y: 22 },
+    PathCmd::LineTo { x: 10, y: 19 },
+    PathCmd::LineTo { x: 8, y: 18 },
+    PathCmd::LineTo { x: 6, y: 20 },
+    PathCmd::LineTo { x: 4, y: 18 },
+    PathCmd::LineTo { x: 6, y: 16 },
+    PathCmd::LineTo { x: 5, y: 14 },
+    PathCmd::LineTo { x: 2, y: 13 },
+    PathCmd::LineTo { x: 2, y: 11 },
+    PathCmd::LineTo { x: 5, y: 10 },
+    PathCmd::LineTo { x: 6, y: 8 },
+    PathCmd::LineTo { x: 4, y: 6 },
+    PathCmd::LineTo { x: 6, y: 4 },
+    PathCmd::LineTo { x: 8, y: 6 },
+    PathCmd::LineTo { x: 10, y: 5 },
+    PathCmd::Close,
+    // Círculo central hueco (radio 3 alrededor de (12, 12)).
+    PathCmd::MoveTo { x: 12, y: 9 },
+    PathCmd::CubicTo {
+        c1x: 14,
+        c1y: 9,
+        c2x: 15,
+        c2y: 10,
+        x: 15,
         y: 12,
     },
-    PathCmd::QuadTo {
-        cx: 16,
-        cy: 16,
+    PathCmd::CubicTo {
+        c1x: 15,
+        c1y: 14,
+        c2x: 14,
+        c2y: 15,
         x: 12,
-        y: 16,
+        y: 15,
     },
-    PathCmd::QuadTo {
-        cx: 8,
-        cy: 16,
-        x: 8,
+    PathCmd::CubicTo {
+        c1x: 10,
+        c1y: 15,
+        c2x: 9,
+        c2y: 14,
+        x: 9,
         y: 12,
     },
-    PathCmd::QuadTo {
-        cx: 8,
-        cy: 8,
+    PathCmd::CubicTo {
+        c1x: 9,
+        c1y: 10,
+        c2x: 10,
+        c2y: 9,
         x: 12,
-        y: 8,
+        y: 9,
     },
     PathCmd::Close,
 ];
@@ -3522,6 +3549,286 @@ fn paint_slider(
     }
 }
 
+/// Textos fijos utilizados en la galería visual (`examples/gallery.rs`).
+pub const GALLERY_TEXTS: &[&str] = &[
+    "Atoll UI · Galería de widgets",
+    "Tema: black · Escala: 1.0x",
+    "Tema: black · Escala: 1.5x",
+    "Tema: graphite · Escala: 1.0x",
+    "Tema: graphite · Escala: 1.5x",
+    "Tema: white · Escala: 1.0x",
+    "Tema: white · Escala: 1.5x",
+    "Primary:",
+    "Secondary:",
+    "Ghost / Icon:",
+    "Toggles:",
+    "Sliders:",
+    "Progress:",
+    "Íconos (11 + ?):",
+    "Normal",
+    "Hover",
+    "Presionado",
+    "Deshabilitado",
+    "Activo",
+    "Inactivo",
+    "Off",
+    "On",
+    "Deshab.",
+    "Inact.",
+    "0%",
+    "50%",
+    "100%",
+];
+
+/// Construye el árbol de widgets de demostración usado por `examples/gallery.rs`.
+#[must_use]
+pub fn build_gallery_tree(theme_name: &str, scale_label: &str, palette: &ThemePalette) -> Node {
+    let header = Node::row(
+        12,
+        MainAlign::SpaceBetween,
+        CrossAlign::Center,
+        vec![
+            Node::label("Atoll UI · Galería de widgets", 18, Tone::Primary),
+            Node::label(
+                format!("Tema: {theme_name} · Escala: {scale_label}"),
+                13,
+                Tone::Muted,
+            ),
+        ],
+    )
+    .with_width(Length::Fill(1));
+
+    let row_primary = Node::row(
+        8,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Primary:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::button(
+                WidgetId::new(10),
+                Some("Normal".to_owned()),
+                Some(IconId::Play),
+                ButtonVariant::Primary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(11),
+                Some("Hover".to_owned()),
+                Some(IconId::Play),
+                ButtonVariant::Primary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(12),
+                Some("Presionado".to_owned()),
+                Some(IconId::Play),
+                ButtonVariant::Primary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(13),
+                Some("Deshabilitado".to_owned()),
+                Some(IconId::Play),
+                ButtonVariant::Primary,
+                false,
+            ),
+        ],
+    );
+
+    let row_secondary = Node::row(
+        8,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Secondary:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::button(
+                WidgetId::new(20),
+                Some("Normal".to_owned()),
+                Some(IconId::Settings),
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(21),
+                Some("Hover".to_owned()),
+                Some(IconId::Settings),
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(22),
+                Some("Presionado".to_owned()),
+                Some(IconId::Settings),
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(23),
+                Some("Deshabilitado".to_owned()),
+                Some(IconId::Settings),
+                ButtonVariant::Secondary,
+                false,
+            ),
+        ],
+    );
+
+    let row_ghost_and_icon_btn = Node::row(
+        8,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Ghost / Icon:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::button(
+                WidgetId::new(30),
+                Some("Normal".to_owned()),
+                None,
+                ButtonVariant::Ghost,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(31),
+                Some("Hover".to_owned()),
+                None,
+                ButtonVariant::Ghost,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(32),
+                Some("Activo".to_owned()),
+                None,
+                ButtonVariant::Ghost,
+                true,
+            ),
+            Node::button(
+                WidgetId::new(33),
+                Some("Inactivo".to_owned()),
+                None,
+                ButtonVariant::Ghost,
+                false,
+            ),
+            Node::icon_button(
+                WidgetId::new(34),
+                IconId::Volume,
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::icon_button(
+                WidgetId::new(35),
+                IconId::Volume,
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::icon_button(
+                WidgetId::new(36),
+                IconId::Volume,
+                ButtonVariant::Secondary,
+                true,
+            ),
+            Node::icon_button(
+                WidgetId::new(37),
+                IconId::VolumeMute,
+                ButtonVariant::Secondary,
+                false,
+            ),
+        ],
+    );
+
+    let row_toggles = Node::row(
+        10,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Toggles:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::label("Off", 12, Tone::Primary),
+            Node::toggle(WidgetId::new(40), false, true),
+            Node::label("On", 12, Tone::Primary),
+            Node::toggle(WidgetId::new(41), true, true),
+            Node::label("Hover", 12, Tone::Primary),
+            Node::toggle(WidgetId::new(42), true, true),
+            Node::label("Deshab.", 12, Tone::Muted),
+            Node::toggle(WidgetId::new(43), false, false),
+            Node::toggle(WidgetId::new(44), true, false),
+        ],
+    );
+
+    let row_sliders = Node::row(
+        10,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Sliders:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::label("0%", 12, Tone::Muted),
+            Node::slider(WidgetId::new(50), Permille::new(0), true).with_width(Length::Fixed(95)),
+            Node::label("50%", 12, Tone::Muted),
+            Node::slider(WidgetId::new(51), Permille::new(500), true).with_width(Length::Fixed(95)),
+            Node::label("100%", 12, Tone::Muted),
+            Node::slider(WidgetId::new(52), Permille::new(1000), true)
+                .with_width(Length::Fixed(95)),
+            Node::label("Inact.", 12, Tone::Muted),
+            Node::slider(WidgetId::new(53), Permille::new(500), false)
+                .with_width(Length::Fixed(80)),
+        ],
+    );
+
+    let row_progress = Node::row(
+        10,
+        MainAlign::Start,
+        CrossAlign::Center,
+        vec![
+            Node::label("Progress:", 13, Tone::Muted).with_width(Length::Fixed(80)),
+            Node::label("0%", 12, Tone::Muted),
+            Node::progress(Permille::new(0), Tone::Accent).with_width(Length::Fixed(120)),
+            Node::label("50%", 12, Tone::Muted),
+            Node::progress(Permille::new(500), Tone::Accent).with_width(Length::Fixed(120)),
+            Node::label("100%", 12, Tone::Muted),
+            Node::progress(Permille::new(1000), Tone::Accent).with_width(Length::Fixed(120)),
+        ],
+    );
+
+    let mut icon_nodes = Vec::with_capacity(14);
+    icon_nodes
+        .push(Node::label("Íconos (11 + ?):", 13, Tone::Muted).with_width(Length::Fixed(110)));
+    for icon in IconId::ALL {
+        icon_nodes.push(Node::icon(icon, 20, Tone::Primary));
+    }
+    icon_nodes.push(Node::icon(IconId::Unknown(999), 20, Tone::Accent));
+
+    let box_bg: Rgba = palette.control_bg;
+    let icons_box = Node::box_container(
+        Edges::symmetric(10, 8),
+        vec![Node::row(
+            14,
+            MainAlign::Start,
+            CrossAlign::Center,
+            icon_nodes,
+        )],
+    )
+    .with_background(Tone::Custom(box_bg))
+    .with_width(Length::Fill(1));
+
+    Node::column(
+        10,
+        MainAlign::Start,
+        CrossAlign::Stretch,
+        vec![
+            header,
+            Node::separator(1),
+            row_primary,
+            row_secondary,
+            row_ghost_and_icon_btn,
+            Node::separator(1),
+            row_toggles,
+            row_sliders,
+            row_progress,
+            Node::separator(1),
+            icons_box,
+        ],
+    )
+    .with_padding(Edges::all(16))
+    .with_width(Length::Fill(1))
+    .with_height(Length::Fill(1))
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
@@ -5441,5 +5748,115 @@ mod tests {
             "dos pintados idénticos deben producir exactamente los mismos bytes"
         );
         assert_valid_premultiplied(&frame_a);
+    }
+
+    #[test]
+    fn settings_gear_icon_has_hollow_center_and_eight_angular_sectors() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Black);
+        let state = UiState::new();
+
+        let tree = Node::icon(IconId::Settings, 24, Tone::Primary);
+        let layout = compute_layout(&tree, Size::new(24, 24), 1.0, &mut measurer).expect("layout");
+        let mut frame = atoll_render::Frame::new(atoll_render::Size::new(24, 24)).expect("frame");
+        super::paint_tree(&tree, &layout, &state, &palette, 1.0, &mut frame);
+
+        // El centro del engranaje (agujero central alrededor de (12, 12)) debe quedar sin pintar.
+        assert_eq!(
+            pixel_at(&frame, 12, 12)[3],
+            0,
+            "el centro del ícono Settings debe quedar sin pintar (agujero del engranaje)"
+        );
+
+        // Debe haber píxeles pintados en los 8 sectores angulares de 45° alrededor del centro,
+        // tanto en el conjunto del ícono como en la corona exterior de los dientes.
+        let mut all_sectors = [0usize; 8];
+        let mut outer_tooth_sectors = [0usize; 8];
+        let cx = 12.0_f32;
+        let cy = 12.0_f32;
+
+        for y in 0..24u32 {
+            for x in 0..24u32 {
+                if pixel_at(&frame, x, y)[3] > 0 {
+                    let dx = (x as f32 + 0.5) - cx;
+                    let dy = (y as f32 + 0.5) - cy;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let angle = dy.atan2(dx); // [-PI, PI]
+                    let normalized =
+                        (angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI) * 8.0;
+                    let sector = (normalized.floor() as usize).min(7);
+                    all_sectors[sector] += 1;
+                    if dist >= 7.5 {
+                        outer_tooth_sectors[sector] += 1;
+                    }
+                }
+            }
+        }
+
+        for (i, &count) in all_sectors.iter().enumerate() {
+            assert!(
+                count > 0,
+                "el sector angular {i} del ícono Settings debe tener píxeles pintados"
+            );
+        }
+        for (i, &count) in outer_tooth_sectors.iter().enumerate() {
+            assert!(
+                count > 0,
+                "el sector exterior {i} (dientes del engranaje) debe tener píxeles pintados"
+            );
+        }
+    }
+
+    fn collect_node_texts<'a>(node: &'a Node, out: &mut Vec<&'a str>) {
+        match &node.kind {
+            WidgetKind::Label { text, .. } => out.push(text.as_str()),
+            WidgetKind::Button {
+                label: Some(text), ..
+            } => out.push(text.as_str()),
+            WidgetKind::Row { children, .. } | WidgetKind::Column { children, .. } => {
+                for child in children {
+                    collect_node_texts(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn gallery_texts_are_fully_supported_by_embedded_font() {
+        let tr = atoll_render::TextRenderer::new().expect("fuente embebida");
+
+        for &text in super::GALLERY_TEXTS {
+            for ch in text.chars() {
+                assert!(
+                    tr.supports(ch),
+                    "el carácter {ch:?} (U+{:04X}) del texto de galería {text:?} no está en la fuente embebida",
+                    u32::from(ch)
+                );
+            }
+        }
+
+        let palette = default_palette_for(atoll_config::Theme::Black);
+        for theme_name in ["black", "graphite", "white"] {
+            for scale_label in ["1.0x", "1.5x"] {
+                let tree = super::build_gallery_tree(theme_name, scale_label, &palette);
+                let mut tree_texts = Vec::new();
+                collect_node_texts(&tree, &mut tree_texts);
+                assert!(!tree_texts.is_empty());
+                for text in tree_texts {
+                    assert!(
+                        super::GALLERY_TEXTS.contains(&text),
+                        "el texto {text:?} de build_gallery_tree debe estar listado en GALLERY_TEXTS"
+                    );
+                    for ch in text.chars() {
+                        assert!(
+                            tr.supports(ch),
+                            "el carácter {ch:?} (U+{:04X}) en {text:?} no está soportado por TextRenderer",
+                            u32::from(ch)
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -14,7 +14,7 @@ use fontdue::{Font, FontSettings};
 
 use crate::{ClipRect, Frame, RenderError};
 
-/// Fuente embebida: Inter Medium recortada a dígitos, signos básicos y letras del español.
+/// Fuente embebida: Inter Medium recortada a ASCII imprimible, Latin-1 Supplement y signos comunes.
 const FONT_BYTES: &[u8] = include_bytes!("../assets/Inter-Medium-atoll.ttf");
 
 /// Tamaño máximo de fuente aceptado, en píxeles.
@@ -112,6 +112,15 @@ impl TextRenderer {
     #[must_use]
     pub fn cached_glyphs(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Indica si la fuente embebida contiene un glifo propio para `ch` (distinto de `.notdef`).
+    ///
+    /// Es una consulta de solo lectura sobre la tabla de glifos de la fuente; no rasteriza
+    /// ni modifica la caché.
+    #[must_use]
+    pub fn supports(&self, ch: char) -> bool {
+        self.font.lookup_glyph_index(ch) != 0
     }
 
     /// Vacía la caché de glifos.
@@ -368,15 +377,32 @@ mod tests {
     #[test]
     fn embedded_font_has_every_character_we_need() {
         let r = renderer();
-        let needed =
-            "0123456789:./,- abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZáéíóúñÁÉÍÓÚÑ";
-        for ch in needed.chars().filter(|c| *c != ' ') {
-            assert_ne!(
-                r.font.lookup_glyph_index(ch),
-                0,
-                "falta {ch:?} en la fuente"
+        for ch in '\u{0020}'..='\u{007E}' {
+            assert!(
+                r.supports(ch),
+                "falta el carácter ASCII {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
             );
         }
+        // En Inter v4.1 todos los puntos de código de Latin-1 Supplement (U+00A0..=U+00FF)
+        // tienen glifo salvo U+00AD (SOFT HYPHEN, carácter de formato invisible).
+        for ch in ('\u{00A0}'..='\u{00FF}').filter(|&c| c != '\u{00AD}') {
+            assert!(
+                r.supports(ch),
+                "falta el carácter Latin-1 {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
+            );
+        }
+        let extra = ['•', '·', '…', '–', '—', '‘', '’', '“', '”', '€', '°', '×'];
+        for ch in extra {
+            assert!(
+                r.supports(ch),
+                "falta el símbolo {ch:?} (U+{:04X}) en la fuente",
+                u32::from(ch)
+            );
+        }
+        assert!(!r.supports('\u{00AD}'), "U+00AD no tiene glifo en Inter");
+        assert!(!r.supports('日'), "CJK queda fuera del subconjunto");
     }
 
     #[test]
