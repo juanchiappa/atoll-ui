@@ -1,0 +1,73 @@
+name: Reporte de bug
+description: Informar un fallo reproducible en Atoll
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar un problema. Si encontraste una vulnerabilidad de seguridad, **no abras un issue público**: reportala en privado siguiendo [`SECURITY.md`](https://github.com/juanchiappa/atoll-ui/blob/main/SECURITY.md).
+
+  - type: input
+    id: atoll_version
+    attributes:
+      label: Versión de Atoll
+      description: Versión descargada (por ejemplo v0.1.0) o hash del commit si compilaste desde el código fuente.
+      placeholder: "v0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows_version
+    attributes:
+      label: Versión de Windows y escalado DPI
+      description: Edición/compilación de Windows (podés verla con winver) y porcentaje de escala del monitor (100 %, 125 %, 150 %, etc.).
+      placeholder: "Windows 11 23H2 (compilación 22631), escala 125 %"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducir
+      description: Enumerá los pasos exactos para reproducir el problema desde que abrís Atoll.
+      placeholder: |
+        1. Abrir atoll.exe
+        2. Editar %APPDATA%\Atoll\config.ini con ...
+        3. Pasar el mouse sobre la isla
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Qué esperabas que pasara
+      description: Comportamiento esperado.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Qué pasó realmente
+      description: Comportamiento observado (si aplica, incluí consumo de RAM/CPU medido con Get-Process).
+    validations:
+      required: true
+
+  - type: textarea
+    id: config_ini
+    attributes:
+      label: Contenido de %APPDATA%\Atoll\config.ini
+      description: Pegá el contenido de tu archivo de configuración si lo modificaste.
+      render: ini
+    validations:
+      required: false
+
+  - type: textarea
+    id: stderr_output
+    attributes:
+      label: Salida por stderr (consola)
+      description: Si ejecutaste atoll.exe desde PowerShell o CMD, pegá cualquier advertencia o mensaje impreso en stderr.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,46 @@
+name: Propuesta de funcionalidad
+description: Sugerir una mejora o funcionalidad nueva para Atoll o sus plugins
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir una propuesta, revisá [`docs/ROADMAP.md`](https://github.com/juanchiappa/atoll-ui/blob/main/docs/ROADMAP.md) y las reglas de [`docs/ARCHITECTURE.md`](https://github.com/juanchiappa/atoll-ui/blob/main/docs/ARCHITECTURE.md): Atoll mantiene el Core en menos de 20 MB de RAM y 0 % de CPU en reposo, y toda integración externa vive como plugin fuera del Core.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problema o necesidad que resuelve
+      description: ¿Qué caso de uso o limitación actual querés resolver?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Propuesta concreta
+      description: Describí cómo debería funcionar desde el punto de vista del usuario.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: ¿Dónde encaja esta funcionalidad?
+      description: Las integraciones (música, dock, Git, IA, N8N, Office, etc.) van siempre como plugins en procesos separados.
+      options:
+        - "Plugin oficial o externo (proceso separado por IPC en plugins/)"
+        - "Core / configuración de la isla (atoll-core, atoll-config, atoll-render, atoll-platform)"
+        - "Menú de configuración (atoll-settings) o toolkit de widgets (atoll-ui)"
+        - "No estoy seguro"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternativas consideradas e impacto en recursos
+      description: ¿Consideraste otras formas de resolverlo? ¿Afecta el consumo de RAM, CPU en reposo o requiere timers/dependencias nuevas?
+    validations:
+      required: false

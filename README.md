@@ -12,6 +12,22 @@ Una UI liviana y nativa para tu sistema operativo. Isla dinámica, personalizaci
 - **Qué incluye hoy:** isla dinámica con transparencia alfa por píxel, reloj (`HH:MM`) y fecha al pasar el mouse, escalado DPI por monitor (`Per-Monitor-V2`), archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo (`black`, `graphite`, `white`, colores, opacidad, radio de esquina) y comportamiento configurable (`hover_delay_ms`, `animation_ms`, estilo `island` o `notch`).
 - **Linux y macOS:** en el [roadmap](docs/ROADMAP.md) (todavía no soportados).
 
+## Medición
+
+Datos medidos sobre el ejecutable descargado del release [`v0.1.0`](https://github.com/juanchiappa/atoll-ui/releases/tag/v0.1.0) en **Windows x64** con la isla abierta en reposo:
+
+- **RAM en reposo:** **8,5 MB** (`WorkingSet64`, medido vía `Get-Process`).
+- **CPU en reposo:** **0 %** — el tiempo de CPU acumulado no cambia entre dos mediciones separadas por 30 segundos.
+- **Tamaño:** ejecutable `atoll.exe` de **548 KB** y paquete `atoll-v0.1.0-windows-x64.zip` de **263 KB**.
+
+Podés reproducir la medición en Windows con PowerShell mienras `atoll.exe` está abierto en reposo:
+
+```powershell
+Get-Process atoll | Select-Object Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64 / 1MB, 2)}}, CPU
+Start-Sleep -Seconds 30
+Get-Process atoll | Select-Object Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64 / 1MB, 2)}}, CPU
+```
+
 ## Descarga
 
 1. Descargá `atoll-v0.1.0-windows-x64.zip` desde la sección de [Releases](https://github.com/juanchiappa/atoll-ui/releases).
@@ -34,6 +50,11 @@ Una UI liviana y nativa para tu sistema operativo. Isla dinámica, personalizaci
 | `packages/` | Configuración y temas (`atoll-config`), protocolo IPC (`atoll-ipc`) y SDK de plugins (`atoll-plugin-sdk`) |
 | `plugins/` | Plugins oficiales (procesos independientes) |
 | `docs/` | Arquitectura, configuración, dependencias, fuentes, guía de releases y roadmap |
+
+## Contribuir y seguridad
+
+- Guía para colaboradores: [CONTRIBUTING.md](CONTRIBUTING.md).
+- Reporte privado de vulnerabilidades: [SECURITY.md](SECURITY.md).
 
 ## Licencia
 

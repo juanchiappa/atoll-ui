@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Reportar una vulnerabilidad de seguridad (privado)
+    url: https://github.com/juanchiappa/atoll-ui/blob/main/SECURITY.md
+    about: No abras un issue público para problemas de seguridad; seguí las instrucciones de SECURITY.md para reportarlo por GitHub Security Advisories.
