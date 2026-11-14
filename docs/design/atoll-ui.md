@@ -233,10 +233,13 @@ pub enum WidgetKind {
 ## 4. Solución para íconos vectoriales y presupuesto de memoria
 
 ### Íconos sin fuentes (`IconId`)
-En lugar de embeber una fuente de íconos (que sumaría decenas de KB al binario y entradas en la caché de glifos de `fontdue`), `atoll-ui` define un `enum IconId` compacto cuyos trazos se dibujan directamente con `tiny-skia` (`PathBuilder` con líneas, arcos y rectángulos redondeados en una grilla normalizada de `24x24` escalada a `size_px * scale`):
+En lugar de embeber una fuente de íconos (que sumaría decenas de KB al binario y entradas en la caché de glifos de `fontdue`), `atoll-ui` define un `enum IconId` compacto (`#[non_exhaustive]`).
+
+> **Regla arquitectónica para el PR 14c:** `atoll-ui` **NO depende de `tiny-skia`**. Los íconos se representan en `atoll-ui` como datos planos (una lista estática de comandos de trazo propios en una grilla normalizada de `24x24`), y `atoll-render` expondrá la función encargada de dibujarlos sobre un `Frame`. Si llegara un `IconId` desconocido en el futuro, se dibujará un marcador neutro.
 
 ```rust
-/// Conjunto cerrado de íconos vectoriales predefinidos (v1).
+/// Conjunto de íconos vectoriales predefinidos (v1).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IconId {
     Play,
@@ -253,8 +256,8 @@ pub enum IconId {
 }
 ```
 
-- **Costo de memoria de los íconos:** **0 bytes en heap y 0 bytes de caché**. Son funciones estáticas que emiten entre 4 y 12 segmentos en `tiny-skia::PathBuilder` en el momento de pintar.
-- **Costo en el binario:** ~1,5 KB de código máquina para las 11 formas vectoriales.
+- **Costo de memoria de los íconos:** **0 bytes en heap y 0 bytes de caché**. Son tajadas estáticas (`&'static [IconCommand]`) de entre 4 y 12 comandos geométricos planos que `atoll-render` traduce en el momento de pintar.
+- **Costo en el binario:** ~1,5 KB de tablas estáticas y código para las 11 formas vectoriales.
 
 ### Presupuesto de memoria del árbol y del layout
 Calculemos el tamaño en memoria en `x86_64` para un árbol grande (por ejemplo, **250 widgets** en `atoll-settings` o varios plugins activos):
@@ -526,16 +529,13 @@ Para mantener PRs chicos, revisables y atómicos, el ítem 14 se divide en **4 P
 
 ---
 
-## 10. Preguntas abiertas para decidir antes de programar el PR 14a
+## 10. Decisiones de diseño confirmadas
 
-Mi recomendación está indicada en cada punto; confirmame si estás de acuerdo o si preferís ajustarla:
-
-1. **Color de acento (`accent`) en `ThemePalette`:**
-   - Hoy `[appearance]` en `config.ini` tiene `background` y `text_color`, pero no `accent_color`.
-   - **Recomendación:** en el ítem 14 derivar `accent` por preset (`#0A84FF` azul sistema en `black` y `graphite`, `#0066CC` en `white`) sin tocar `config.ini`, o bien agregar `accent_color` opcional en `[appearance]`. Recomiendo **derivarlo del preset por ahora** para no tocar `atoll-config` en el 14a y evaluar si vale la pena exponerlo en `config.ini` cuando hagamos `atoll-settings` (ítem 17).
-2. **Lista inicial de `IconId` (11 íconos):**
-   - Propuse `Play`, `Pause`, `NextTrack`, `PreviousTrack`, `Volume`, `VolumeMute`, `Settings`, `Check`, `Close`, `ChevronRight`, `ChevronDown` pensando en el plugin de música (ítem 18) y `atoll-settings` (ítem 17).
-   - **Recomendación:** arrancar con esos 11 en el PR 14c y sumar nuevos variantes al enum a medida que un plugin concreto los necesite.
-3. **Clic izquierdo vs. clic derecho en la ventana:**
-   - Hoy el clic derecho (`WM_RBUTTONUP`) cierra la isla.
-   - **Recomendación:** mantener el clic derecho reservado para cerrar la isla (y en el futuro abrir el menú contextual / configuración), y que `atoll-ui` procese únicamente el **clic izquierdo** (`WM_LBUTTONDOWN` / `WM_LBUTTONUP`) para botones, toggles y sliders.
+1. **Color de acento (`accent`) en `ThemePalette` (Resuelta):**
+   - Se deriva directamente del preset actual (`#0A84FF` en `black` y `graphite`, `#0066CC` en `white`), sin agregar una clave nueva en `config.ini`.
+2. **Catálogo inicial de `IconId` (Resuelta):**
+   - `IconId` lleva `#[non_exhaustive]` e incluye los 11 íconos propuestos (`Play`, `Pause`, `NextTrack`, `PreviousTrack`, `Volume`, `VolumeMute`, `Settings`, `Check`, `Close`, `ChevronRight`, `ChevronDown`). En el PR 14c, cualquier id desconocido se tratará como un marcador neutro.
+3. **Botones del mouse (Resuelta):**
+   - Clic izquierdo (`WM_LBUTTONDOWN` / `WM_LBUTTONUP`) para interactuar con los widgets de `atoll-ui`; el clic derecho (`WM_RBUTTONUP`) sigue cerrando la isla.
+4. **Frontera entre `atoll-ui` y `tiny-skia` para el PR 14c (Resuelta):**
+   - `atoll-ui` **NO depende de `tiny-skia`**. En el PR 14c los íconos se definirán como datos planos (lista de comandos de trazo propia) y `atoll-render` expondrá la función para dibujarlos. En el PR 14a `atoll-ui` no tiene ninguna dependencia externa ni interna.

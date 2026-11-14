@@ -7,6 +7,7 @@ members = [
     "packages/atoll-config",
     "packages/atoll-ipc",
     "packages/atoll-plugin-sdk",
+    "packages/atoll-ui",
 ]
 
 [workspace.package]
@@ -22,6 +23,7 @@ atoll-platform = { path = "core/atoll-platform" }
 atoll-render = { path = "core/atoll-render" }
 atoll-config = { path = "packages/atoll-config" }
 atoll-ipc = { path = "packages/atoll-ipc" }
+atoll-ui = { path = "packages/atoll-ui" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

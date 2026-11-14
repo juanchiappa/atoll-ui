@@ -19,12 +19,13 @@ core/atoll-core        binario "atoll": loop de eventos, contenido (island), est
 core/atoll-platform    TODO el código específico de SO (cfg(target_os)); módulos portables animation, clock y dpi
 core/atoll-render      render por software con tiny-skia; texto con fontdue y fuente embebida
 packages/atoll-config  configuración y temas: parser y serializador propios sin dependencias
+packages/atoll-ui      mini toolkit declarativo de widgets: árbol de datos y motor de layout puro sin dependencias
 packages/atoll-ipc     protocolo IPC Core <-> plugins
 packages/atoll-plugin-sdk
 plugins/               plugins oficiales (cada uno, proyecto Cargo independiente)
 docs/                  ARCHITECTURE.md, CONFIG.md, DEPENDENCIES.md, ROADMAP.md, HANDOFF.md, FONTS.md
 ```
-Planeado: `packages/atoll-ui` (mini toolkit de widgets) y `core/atoll-settings` (menú de configuración, ejecutable aparte).
+Planeado: `core/atoll-settings` (menú de configuración, ejecutable aparte).
 
 ## Estado
 Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio por esquina configurables), animación de hover con timer efímero y retardo opcional (`hover_delay_ms`, `animation_ms`), estilo `island` o `notch` (muesca superior), texto, reloj, escalado DPI por monitor, y archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo. Linux y macOS devuelven `Unsupported`.
