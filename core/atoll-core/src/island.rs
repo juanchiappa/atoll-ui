@@ -143,15 +143,32 @@ pub fn report_warnings(warnings: &[Warning]) {
     }
 }
 
-/// Carga `config.ini` desde `file` o lo crea (junto con `dir`) con los valores por defecto.
+/// Decide si al arrancar corresponde escribir la plantilla por defecto (`Config::default().to_text()`)
+/// en `config.ini`.
 ///
-/// Nunca falla: si no se puede crear o leer, usa [`Config::default`]; si tiene advertencias,
-/// las escribe en `stderr` y las devuelve para que la recarga en vivo no las repita si
-/// siguen iguales.
+/// Devuelve `true` cuando el archivo no existe (`None`) o cuando existe pero está vacío o contiene
+/// únicamente espacios en blanco y saltos de línea (`Some(text)` con `text.trim().is_empty()`).
+/// Si tiene cualquier otro carácter (aunque sea solo un comentario `#` o una clave inválida),
+/// devuelve `false` para no pisar el archivo del usuario.
+#[must_use]
+pub fn should_populate_default_config(existing_text: Option<&str>) -> bool {
+    match existing_text {
+        None => true,
+        Some(text) => text.trim().is_empty(),
+    }
+}
+
+/// Carga `config.ini` desde `file` o lo crea/rellena (junto con `dir`) con los valores por defecto.
+///
+/// Al arrancar, si el archivo no existe o existe vacío (0 bytes o solo espacios y saltos de línea),
+/// se escribe con `Config::default().to_text()`. Si tiene cualquier contenido (incluso solo
+/// comentarios o claves inválidas), no se modifica en disco. Nunca falla: si no se puede crear,
+/// escribir o leer, usa [`Config::default`]; si tiene advertencias, las escribe en `stderr` y las
+/// devuelve para que la recarga en vivo no las repita si siguen iguales.
 #[must_use]
 pub fn load_or_create_config(dir: &Path, file: &Path) -> (Config, Vec<Warning>) {
     if !file.exists() {
-        if fs::create_dir_all(dir).is_ok() {
+        if should_populate_default_config(None) && fs::create_dir_all(dir).is_ok() {
             let _ = fs::write(file, Config::default().to_text());
         }
         return (Config::default(), Vec::new());
@@ -159,6 +176,10 @@ pub fn load_or_create_config(dir: &Path, file: &Path) -> (Config, Vec<Warning>) 
     let Ok(text) = fs::read_to_string(file) else {
         return (Config::default(), Vec::new());
     };
+    if should_populate_default_config(Some(&text)) {
+        let _ = fs::write(file, Config::default().to_text());
+        return (Config::default(), Vec::new());
+    }
     let (config, warnings) = atoll_config::parse(&text);
     report_warnings(&warnings);
     (config, warnings)
@@ -364,7 +385,8 @@ mod tests {
 
     use super::{
         effective_color, filter_new_warnings, format_date, format_time, island_config_from,
-        load_or_create_config, physical_corner_radii, physical_corner_radius, IslandPainter,
+        load_or_create_config, physical_corner_radii, physical_corner_radius,
+        should_populate_default_config, IslandPainter,
     };
     use atoll_config::{Color as ConfigColor, Config, CornerRadius, Theme, Warning, WarningKind};
     use atoll_platform::{LocalTime, Painter};
@@ -854,6 +876,73 @@ style = notch
         fs::remove_file(&file).expect("borra");
         assert!(p.reload_config().is_none());
         assert_eq!(p.config().appearance.theme, Theme::Graphite);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn populate_decision_triggers_only_for_missing_empty_or_whitespace_only() {
+        assert!(should_populate_default_config(None));
+        assert!(should_populate_default_config(Some("")));
+        assert!(should_populate_default_config(Some("   \t\r\n  \n")));
+
+        // Cualquier contenido visible (comentarios, secciones o claves inválidas) se respeta.
+        assert!(!should_populate_default_config(Some("# mi comentario\n")));
+        assert!(!should_populate_default_config(Some("[island]\n")));
+        assert!(!should_populate_default_config(Some(
+            "clave_invalida = ???"
+        )));
+    }
+
+    #[test]
+    fn startup_rewrites_empty_or_whitespace_config_but_preserves_comments_and_reload_never_writes()
+    {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push(format!("atoll_test_empty_cfg_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("crea carpeta temporal");
+        let file = temp_dir.join("config.ini");
+        let canonical = Config::default().to_text();
+
+        // 1. Archivo de 0 bytes al arrancar -> se rellena con la plantilla por defecto.
+        fs::write(&file, "").expect("escribe vacío");
+        let (cfg_empty, warnings_empty) = load_or_create_config(&temp_dir, &file);
+        assert_eq!(cfg_empty, Config::default());
+        assert!(warnings_empty.is_empty());
+        assert_eq!(fs::read_to_string(&file).expect("lee"), canonical);
+
+        // 2. Archivo con solo espacios y saltos de línea al arrancar -> se rellena con la plantilla.
+        fs::write(&file, "  \r\n\t  \n").expect("escribe espacios");
+        let (cfg_ws, warnings_ws) = load_or_create_config(&temp_dir, &file);
+        assert_eq!(cfg_ws, Config::default());
+        assert!(warnings_ws.is_empty());
+        assert_eq!(fs::read_to_string(&file).expect("lee"), canonical);
+
+        // 3. Archivo con solo un comentario -> NO se toca en disco.
+        let comment_only = "# archivo reservado por el usuario\n";
+        fs::write(&file, comment_only).expect("escribe comentario");
+        let (cfg_comment, warnings_comment) = load_or_create_config(&temp_dir, &file);
+        assert_eq!(cfg_comment, Config::default());
+        assert!(warnings_comment.is_empty());
+        assert_eq!(fs::read_to_string(&file).expect("lee"), comment_only);
+
+        // 4. Archivo con clave inválida -> NO se toca en disco y devuelve la advertencia.
+        let invalid_only = "[island]\nwidth = 99999\n";
+        fs::write(&file, invalid_only).expect("escribe inválido");
+        let (_, warnings_invalid) = load_or_create_config(&temp_dir, &file);
+        assert_eq!(warnings_invalid.len(), 1);
+        assert_eq!(fs::read_to_string(&file).expect("lee"), invalid_only);
+
+        // 5. Durante la recarga en vivo, un archivo vacío NO se reescribe en disco.
+        let mut p = IslandPainter::from_config(
+            Config::default(),
+            Some(temp_dir.clone()),
+            Some(file.clone()),
+        )
+        .expect("painter");
+        fs::write(&file, "").expect("vacía en vivo");
+        let _ = p.reload_config();
+        assert_eq!(fs::read_to_string(&file).expect("lee"), "");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
