@@ -8,7 +8,156 @@ mod text;
 use std::fmt;
 
 pub use text::{Color, LineMetrics, TextRenderer};
-use tiny_skia::{FillRule, Paint, Path, PathBuilder, Pixmap, Transform};
+use tiny_skia::{
+    FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, PixmapMut, Stroke, Transform,
+};
+
+/// Tamaño de la grilla entera normalizada para comandos de íconos vectoriales (`24 × 24`).
+pub const ICON_GRID_SIZE: i16 = 24;
+
+/// Rectángulo entero en coordenadas de píxeles del [`Frame`], usado para posicionar y recortar (`clip`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClipRect {
+    /// Coordenada X del borde izquierdo, en píxeles físicos.
+    pub x: i32,
+    /// Coordenada Y del borde superior, en píxeles físicos.
+    pub y: i32,
+    /// Ancho del rectángulo, en píxeles físicos.
+    pub width: u32,
+    /// Alto del rectángulo, en píxeles físicos.
+    pub height: u32,
+}
+
+impl ClipRect {
+    /// Rectángulo vacío en el origen (`0, 0, 0, 0`).
+    pub const ZERO: Self = Self {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+
+    /// Crea un [`ClipRect`] en `(x, y)` con dimensiones `width` × `height`.
+    #[must_use]
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Crea un [`ClipRect`] ubicado en `(0, 0)` con el tamaño `size`.
+    #[must_use]
+    pub const fn from_size(size: Size) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: size.width,
+            height: size.height,
+        }
+    }
+
+    /// Borde derecho (`x + width`) con aritmética saturada.
+    #[must_use]
+    pub const fn right(self) -> i32 {
+        self.x.saturating_add_unsigned(self.width)
+    }
+
+    /// Borde inferior (`y + height`) con aritmética saturada.
+    #[must_use]
+    pub const fn bottom(self) -> i32 {
+        self.y.saturating_add_unsigned(self.height)
+    }
+
+    /// Comprueba si `inner` está íntegramente contenido dentro de `self`.
+    #[must_use]
+    pub const fn contains_rect(self, inner: Self) -> bool {
+        inner.x >= self.x
+            && inner.y >= self.y
+            && inner.right() <= self.right()
+            && inner.bottom() <= self.bottom()
+    }
+
+    /// Calcula la intersección entre `self` y `other` con aritmética saturada.
+    ///
+    /// Si no se solapan o alguno tiene área nula, devuelve [`ClipRect::ZERO`].
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        if self.width == 0 || self.height == 0 || other.width == 0 || other.height == 0 {
+            return Self::ZERO;
+        }
+        let x1 = if self.x > other.x { self.x } else { other.x };
+        let y1 = if self.y > other.y { self.y } else { other.y };
+        let r1 = self.right();
+        let r2 = other.right();
+        let x2 = if r1 < r2 { r1 } else { r2 };
+        let b1 = self.bottom();
+        let b2 = other.bottom();
+        let y2 = if b1 < b2 { b1 } else { b2 };
+
+        if x2 <= x1 || y2 <= y1 {
+            return Self::ZERO;
+        }
+        Self {
+            x: x1,
+            y: y1,
+            width: x2.abs_diff(x1),
+            height: y2.abs_diff(y1),
+        }
+    }
+}
+
+/// Comando de trazo vectorial plano en una grilla entera fija ([`ICON_GRID_SIZE`] = `24 × 24`).
+///
+/// Es una estructura de datos pura sin tipos de `tiny-skia`, de modo que `atoll-ui`
+/// pueda declarar íconos como tajadas estáticas `&'static [PathCmd]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathCmd {
+    /// Mueve el cursor a `(x, y)` sin trazar.
+    MoveTo {
+        /// Coordenada X en la grilla.
+        x: i16,
+        /// Coordenada Y en la grilla.
+        y: i16,
+    },
+    /// Traza un segmento recto hasta `(x, y)`.
+    LineTo {
+        /// Coordenada X final en la grilla.
+        x: i16,
+        /// Coordenada Y final en la grilla.
+        y: i16,
+    },
+    /// Traza una curva cuadrática de Bézier con control `(cx, cy)` hasta `(x, y)`.
+    QuadTo {
+        /// Coordenada X del punto de control.
+        cx: i16,
+        /// Coordenada Y del punto de control.
+        cy: i16,
+        /// Coordenada X final.
+        x: i16,
+        /// Coordenada Y final.
+        y: i16,
+    },
+    /// Traza una curva cúbica de Bézier con controles `(c1x, c1y)` y `(c2x, c2y)` hasta `(x, y)`.
+    CubicTo {
+        /// Coordenada X del primer control.
+        c1x: i16,
+        /// Coordenada Y del primer control.
+        c1y: i16,
+        /// Coordenada X del segundo control.
+        c2x: i16,
+        /// Coordenada Y del segundo control.
+        c2y: i16,
+        /// Coordenada X final.
+        x: i16,
+        /// Coordenada Y final.
+        y: i16,
+    },
+    /// Cierra el sub-camino actual.
+    Close,
+}
 
 /// Tamaño en píxeles de una superficie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +258,36 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Crea un [`Frame`] transparente de tamaño `size`.
+    ///
+    /// # Errors
+    ///
+    /// Devuelve [`RenderError::InvalidSize`] si el ancho o el alto son cero o exceden el límite.
+    pub fn new(size: Size) -> Result<Self, RenderError> {
+        let pixmap = Pixmap::new(size.width, size.height).ok_or(RenderError::InvalidSize(size))?;
+        Ok(Self {
+            size,
+            rgba: pixmap.take(),
+        })
+    }
+
+    /// Crea un [`Frame`] de tamaño `size` íntegramente relleno con `color` (premultiplicado).
+    ///
+    /// # Errors
+    ///
+    /// Devuelve [`RenderError::InvalidSize`] si el ancho o el alto son cero o exceden el límite.
+    pub fn new_filled(size: Size, color: Color) -> Result<Self, RenderError> {
+        let mut frame = Self::new(size)?;
+        fill_rounded_rect(
+            &mut frame,
+            ClipRect::from_size(size),
+            CornerRadii::ZERO,
+            color,
+            ClipRect::from_size(size),
+        );
+        Ok(frame)
+    }
+
     /// Tamaño de la imagen en píxeles.
     #[must_use]
     pub const fn size(&self) -> Size {
@@ -121,6 +300,12 @@ impl Frame {
         &self.rgba
     }
 
+    /// Acceso mutable a los bytes RGBA premultiplicados del [`Frame`].
+    #[must_use]
+    pub fn rgba_premultiplied_mut(&mut self) -> &mut [u8] {
+        &mut self.rgba
+    }
+
     /// Copia de los píxeles en orden BGRA (el que espera Windows).
     #[must_use]
     pub fn bgra_premultiplied(&self) -> Vec<u8> {
@@ -129,6 +314,33 @@ impl Frame {
             .iter()
             .flat_map(|&[r, g, b, a]| [b, g, r, a])
             .collect()
+    }
+
+    /// Dibuja un rectángulo con esquinas redondeadas independientes (`radii`) y color `color`
+    /// dentro de `rect`, recortado estrictamente a la intersección entre `clip` y este [`Frame`].
+    pub fn fill_rounded_rect(
+        &mut self,
+        rect: ClipRect,
+        radii: CornerRadii,
+        color: Color,
+        clip: ClipRect,
+    ) {
+        fill_rounded_rect(self, rect, radii, color, clip);
+    }
+
+    /// Dibuja una secuencia de comandos de trazo (`commands`), definidos sobre una grilla
+    /// lógica de [`ICON_GRID_SIZE`] × [`ICON_GRID_SIZE`] (`24×24`), escalados para caber
+    /// dentro de `rect` y recortados estrictamente a `clip`.
+    pub fn stroke_path(
+        &mut self,
+        rect: ClipRect,
+        commands: &[PathCmd],
+        stroke_width: f32,
+        color: Color,
+        scale: f32,
+        clip: ClipRect,
+    ) {
+        stroke_path(self, commands, rect, stroke_width, scale, color, clip);
     }
 }
 
@@ -256,6 +468,233 @@ fn rounded_rect(width: f32, height: f32, radii: CornerRadii) -> Option<Path> {
 
     builder.close();
     builder.finish()
+}
+
+/// Dibuja un rectángulo con esquinas redondeadas (`radii`) relleno con `color`
+/// sobre `frame`, recortando estrictamente el resultado a `clip`.
+///
+/// Usa aritmética saturante: si `rect` o `clip` tienen tamaño cero, caen fuera del
+/// `frame` o `color.a == 0`, no modifica ningún píxel y jamás entra en pánico.
+pub fn fill_rounded_rect(
+    frame: &mut Frame,
+    rect: ClipRect,
+    radii: CornerRadii,
+    color: Color,
+    clip: ClipRect,
+) {
+    if rect.width == 0 || rect.height == 0 || color.a == 0 {
+        return;
+    }
+    let frame_bounds = ClipRect::from_size(frame.size);
+    let eff_clip = clip.intersect(frame_bounds);
+    let work = eff_clip.intersect(rect);
+    if work.width == 0 || work.height == 0 {
+        return;
+    }
+
+    let Some(path) = rounded_rect(rect.width as f32, rect.height as f32, radii) else {
+        return;
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    paint.anti_alias = true;
+
+    // Caso rápido sin alojamientos: `rect` entra entero dentro del `clip` efectivo.
+    if eff_clip.contains_rect(rect) {
+        if let Some(mut pixmap) =
+            PixmapMut::from_bytes(&mut frame.rgba, frame.size.width, frame.size.height)
+        {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::from_translate(rect.x as f32, rect.y as f32),
+                None,
+            );
+        }
+        return;
+    }
+
+    // Caso recortado: dibujamos sobre una sub-superficie del tamaño exacto de `work`
+    // para garantizar que ni un solo píxel fuera de `eff_clip` se modifique.
+    let Some(mut sub) = copy_sub_pixmap(frame, work) else {
+        return;
+    };
+    let tx = (i64::from(rect.x) - i64::from(work.x)) as f32;
+    let ty = (i64::from(rect.y) - i64::from(work.y)) as f32;
+    sub.as_mut().fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::from_translate(tx, ty),
+        None,
+    );
+    write_sub_pixmap(frame, work, &sub);
+}
+
+/// Traza una lista de comandos vectoriales [`PathCmd`] (definidos en una grilla de
+/// [`ICON_GRID_SIZE`] × [`ICON_GRID_SIZE`]) escalados al rectángulo `rect`, con grosor
+/// lógico `stroke_width` multiplicado por `scale`, color `color` y recorte estricto a `clip`.
+///
+/// Usa aritmética saturante: si `rect` o `clip` son degenerados, están fuera del `frame`
+/// o los parámetros no son positivos/finitos, no hace nada y jamás entra en pánico.
+pub fn stroke_path(
+    frame: &mut Frame,
+    commands: &[PathCmd],
+    rect: ClipRect,
+    stroke_width: f32,
+    scale: f32,
+    color: Color,
+    clip: ClipRect,
+) {
+    if commands.is_empty()
+        || rect.width == 0
+        || rect.height == 0
+        || color.a == 0
+        || !stroke_width.is_finite()
+        || stroke_width <= 0.0
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return;
+    }
+
+    let frame_bounds = ClipRect::from_size(frame.size);
+    let work = clip.intersect(rect).intersect(frame_bounds);
+    if work.width == 0 || work.height == 0 {
+        return;
+    }
+
+    let grid = f32::from(ICON_GRID_SIZE);
+    let sx = (rect.width as f32) / grid;
+    let sy = (rect.height as f32) / grid;
+    let map_x = |gx: i16| -> f32 { f32::from(gx) * sx };
+    let map_y = |gy: i16| -> f32 { f32::from(gy) * sy };
+
+    let mut builder = PathBuilder::new();
+    for &cmd in commands {
+        match cmd {
+            PathCmd::MoveTo { x, y } => builder.move_to(map_x(x), map_y(y)),
+            PathCmd::LineTo { x, y } => builder.line_to(map_x(x), map_y(y)),
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                builder.quad_to(map_x(cx), map_y(cy), map_x(x), map_y(y));
+            }
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                builder.cubic_to(
+                    map_x(c1x),
+                    map_y(c1y),
+                    map_x(c2x),
+                    map_y(c2y),
+                    map_x(x),
+                    map_y(y),
+                );
+            }
+            PathCmd::Close => builder.close(),
+        }
+    }
+
+    let Some(path) = builder.finish() else {
+        return;
+    };
+
+    let min_dim = (rect.width.min(rect.height) as f32).max(1.0);
+    let phys_width = (stroke_width * scale).clamp(1.0, (min_dim / 2.0).max(1.0));
+    let stroke = Stroke {
+        width: phys_width,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    paint.anti_alias = true;
+
+    let Some(mut sub) = copy_sub_pixmap(frame, work) else {
+        return;
+    };
+    let tx = (i64::from(rect.x) - i64::from(work.x)) as f32;
+    let ty = (i64::from(rect.y) - i64::from(work.y)) as f32;
+    sub.as_mut().stroke_path(
+        &path,
+        &paint,
+        &stroke,
+        Transform::from_translate(tx, ty),
+        None,
+    );
+    write_sub_pixmap(frame, work, &sub);
+}
+
+/// Copia la región `work` (que ya debe estar dentro de `frame`) a un [`Pixmap`] temporal.
+fn copy_sub_pixmap(frame: &Frame, work: ClipRect) -> Option<Pixmap> {
+    let mut sub = Pixmap::new(work.width, work.height)?;
+    let frame_w = frame.size.width as usize;
+    let work_w = work.width as usize;
+    let work_h = work.height as usize;
+    let start_x = usize::try_from(work.x).ok()?;
+    let start_y = usize::try_from(work.y).ok()?;
+
+    let dst_bytes = sub.data_mut();
+    for row in 0..work_h {
+        let src_row_start = (start_y + row)
+            .checked_mul(frame_w)?
+            .checked_add(start_x)?
+            .checked_mul(4)?;
+        let src_row_end = src_row_start.checked_add(work_w.checked_mul(4)?)?;
+        let dst_row_start = row.checked_mul(work_w)?.checked_mul(4)?;
+        let dst_row_end = dst_row_start.checked_add(work_w.checked_mul(4)?)?;
+        let src_slice = frame.rgba.get(src_row_start..src_row_end)?;
+        let dst_slice = dst_bytes.get_mut(dst_row_start..dst_row_end)?;
+        dst_slice.copy_from_slice(src_slice);
+    }
+    Some(sub)
+}
+
+/// Escribe de vuelta los píxeles de `sub` en la región `work` de `frame`.
+fn write_sub_pixmap(frame: &mut Frame, work: ClipRect, sub: &Pixmap) {
+    let frame_w = frame.size.width as usize;
+    let work_w = work.width as usize;
+    let work_h = work.height as usize;
+    let Ok(start_x) = usize::try_from(work.x) else {
+        return;
+    };
+    let Ok(start_y) = usize::try_from(work.y) else {
+        return;
+    };
+
+    let src_bytes = sub.data();
+    for row in 0..work_h {
+        let Some(dst_row_start) = (start_y + row)
+            .checked_mul(frame_w)
+            .and_then(|v| v.checked_add(start_x))
+            .and_then(|v| v.checked_mul(4))
+        else {
+            return;
+        };
+        let Some(dst_row_end) = dst_row_start.checked_add(work_w.saturating_mul(4)) else {
+            return;
+        };
+        let Some(src_row_start) = row.checked_mul(work_w).and_then(|v| v.checked_mul(4)) else {
+            return;
+        };
+        let Some(src_row_end) = src_row_start.checked_add(work_w.saturating_mul(4)) else {
+            return;
+        };
+        if let (Some(src_slice), Some(dst_slice)) = (
+            src_bytes.get(src_row_start..src_row_end),
+            frame.rgba.get_mut(dst_row_start..dst_row_end),
+        ) {
+            dst_slice.copy_from_slice(src_slice);
+        }
+    }
 }
 
 #[cfg(test)]

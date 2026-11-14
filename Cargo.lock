@@ -57,6 +57,10 @@ dependencies = [
 [[package]]
 name = "atoll-ui"
 version = "0.1.0"
+dependencies = [
+ "atoll-config",
+ "atoll-render",
+]
 
 [[package]]
 name = "bytemuck"

@@ -16,8 +16,13 @@
 //!    estados pura y determinista que procesa entradas del puntero ([`PointerInput`]),
 //!    emite eventos de alto nivel ([`UiEvent`]) sin mutar el árbol y calcula con
 //!    exactitud cuándo hace falta redibujar (`needs_redraw`).
+//! 5. **Tema, íconos y pintado ([`ThemePalette`], [`paint_tree`]):** derivación de
+//!    colores por aritmética entera desde `atoll-config`, catálogo de íconos vectoriales
+//!    como datos planos ([`PathCmd`]) y dibujo recortado sobre `atoll-render::Frame`.
 
 use std::fmt;
+
+pub use atoll_render::{PathCmd, ICON_GRID_SIZE};
 
 /// Profundidad máxima permitida para un árbol de widgets (la raíz tiene profundidad 1).
 pub const MAX_TREE_DEPTH: usize = 32;
@@ -146,6 +151,12 @@ impl Rect {
         Size::new(self.width, self.height)
     }
 
+    /// Devuelve `true` si el ancho o el alto son cero.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
     /// Borde derecho (`x + width`) con aritmética saturada.
     #[must_use]
     pub const fn right(self) -> i32 {
@@ -221,6 +232,15 @@ pub struct Rgba {
 }
 
 impl Rgba {
+    /// Transparente (`0, 0, 0, 0`).
+    pub const TRANSPARENT: Self = Self::new(0, 0, 0, 0);
+
+    /// Negro opaco (`0, 0, 0, 255`).
+    pub const BLACK: Self = Self::new(0, 0, 0, 255);
+
+    /// Blanco opaco (`255, 255, 255, 255`).
+    pub const WHITE: Self = Self::new(255, 255, 255, 255);
+
     /// Crea un color opaco (`a = 255`).
     #[must_use]
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
@@ -231,6 +251,55 @@ impl Rgba {
     #[must_use]
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
+    }
+
+    /// Devuelve el mismo color con el canal alfa reemplazado por `a`.
+    #[must_use]
+    pub const fn with_alpha(self, a: u8) -> Self {
+        Self {
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            a,
+        }
+    }
+
+    /// Convierte un [`atoll_config::Color`] a [`Rgba`].
+    #[must_use]
+    pub const fn from_config_color(c: atoll_config::Color) -> Self {
+        Self {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }
+    }
+
+    /// Convierte este [`Rgba`] a [`atoll_render::Color`].
+    #[must_use]
+    pub const fn to_render_color(self) -> atoll_render::Color {
+        atoll_render::Color::rgba(self.r, self.g, self.b, self.a)
+    }
+
+    /// Mezcla linealmente `self` con `overlay` usando aritmética entera en milésimas
+    /// (`weight_permille = 0` devuelve `self`; `1000` devuelve `overlay`).
+    #[must_use]
+    pub const fn blend_integer(self, overlay: Self, weight_permille: u16) -> Self {
+        const fn mix_channel(a: u8, b: u8, inv: u32, w: u32) -> u8 {
+            ((a as u32 * inv + b as u32 * w + 500) / 1000) as u8
+        }
+        let w = if weight_permille > 1000 {
+            1000u32
+        } else {
+            weight_permille as u32
+        };
+        let inv = 1000 - w;
+        Self {
+            r: mix_channel(self.r, overlay.r, inv, w),
+            g: mix_channel(self.g, overlay.g, inv, w),
+            b: mix_channel(self.b, overlay.b, inv, w),
+            a: mix_channel(self.a, overlay.a, inv, w),
+        }
     }
 }
 
@@ -317,8 +386,8 @@ impl Permille {
 /// Catálogo de íconos vectoriales predefinidos de `atoll-ui`.
 ///
 /// Es `#[non_exhaustive]` para permitir agregar íconos en versiones futuras sin
-/// romper compatibilidad; cualquier variante desconocida se tratará como un
-/// marcador neutro al pintar (ítem 14c).
+/// romper compatibilidad; cualquier variante desconocida o [`IconId::Unknown`]
+/// se dibuja como un marcador neutro (círculo hueco) sin error ni pánico.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IconId {
@@ -344,6 +413,220 @@ pub enum IconId {
     ChevronRight,
     /// Flecha / chevron hacia abajo (`ChevronDown`).
     ChevronDown,
+    /// Identificador desconocido recibido desde una versión futura o un plugin externo;
+    /// se dibuja con el marcador neutro ([`UNKNOWN_ICON_COMMANDS`]).
+    Unknown(u16),
+}
+
+/// Comandos de trazo del marcador neutro para íconos desconocidos (círculo hueco en grilla `24 × 24`).
+pub const UNKNOWN_ICON_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 12, y: 5 },
+    PathCmd::CubicTo {
+        c1x: 16,
+        c1y: 5,
+        c2x: 19,
+        c2y: 8,
+        x: 19,
+        y: 12,
+    },
+    PathCmd::CubicTo {
+        c1x: 19,
+        c1y: 16,
+        c2x: 16,
+        c2y: 19,
+        x: 12,
+        y: 19,
+    },
+    PathCmd::CubicTo {
+        c1x: 8,
+        c1y: 19,
+        c2x: 5,
+        c2y: 16,
+        x: 5,
+        y: 12,
+    },
+    PathCmd::CubicTo {
+        c1x: 5,
+        c1y: 8,
+        c2x: 8,
+        c2y: 5,
+        x: 12,
+        y: 5,
+    },
+    PathCmd::Close,
+];
+
+const ICON_PLAY_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 7, y: 5 },
+    PathCmd::LineTo { x: 19, y: 12 },
+    PathCmd::LineTo { x: 7, y: 19 },
+    PathCmd::Close,
+];
+
+const ICON_PAUSE_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 8, y: 5 },
+    PathCmd::LineTo { x: 8, y: 19 },
+    PathCmd::MoveTo { x: 16, y: 5 },
+    PathCmd::LineTo { x: 16, y: 19 },
+];
+
+const ICON_NEXT_TRACK_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 5, y: 6 },
+    PathCmd::LineTo { x: 15, y: 12 },
+    PathCmd::LineTo { x: 5, y: 18 },
+    PathCmd::Close,
+    PathCmd::MoveTo { x: 18, y: 6 },
+    PathCmd::LineTo { x: 18, y: 18 },
+];
+
+const ICON_PREV_TRACK_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 6, y: 6 },
+    PathCmd::LineTo { x: 6, y: 18 },
+    PathCmd::MoveTo { x: 19, y: 6 },
+    PathCmd::LineTo { x: 9, y: 12 },
+    PathCmd::LineTo { x: 19, y: 18 },
+    PathCmd::Close,
+];
+
+const ICON_VOLUME_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 4, y: 9 },
+    PathCmd::LineTo { x: 8, y: 9 },
+    PathCmd::LineTo { x: 13, y: 5 },
+    PathCmd::LineTo { x: 13, y: 19 },
+    PathCmd::LineTo { x: 8, y: 15 },
+    PathCmd::LineTo { x: 4, y: 15 },
+    PathCmd::Close,
+    PathCmd::MoveTo { x: 16, y: 8 },
+    PathCmd::QuadTo {
+        cx: 20,
+        cy: 12,
+        x: 16,
+        y: 16,
+    },
+];
+
+const ICON_VOLUME_MUTE_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 4, y: 9 },
+    PathCmd::LineTo { x: 8, y: 9 },
+    PathCmd::LineTo { x: 13, y: 5 },
+    PathCmd::LineTo { x: 13, y: 19 },
+    PathCmd::LineTo { x: 8, y: 15 },
+    PathCmd::LineTo { x: 4, y: 15 },
+    PathCmd::Close,
+    PathCmd::MoveTo { x: 16, y: 9 },
+    PathCmd::LineTo { x: 20, y: 15 },
+    PathCmd::MoveTo { x: 20, y: 9 },
+    PathCmd::LineTo { x: 16, y: 15 },
+];
+
+const ICON_SETTINGS_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 12, y: 4 },
+    PathCmd::LineTo { x: 12, y: 7 },
+    PathCmd::MoveTo { x: 12, y: 17 },
+    PathCmd::LineTo { x: 12, y: 20 },
+    PathCmd::MoveTo { x: 4, y: 12 },
+    PathCmd::LineTo { x: 7, y: 12 },
+    PathCmd::MoveTo { x: 17, y: 12 },
+    PathCmd::LineTo { x: 20, y: 12 },
+    PathCmd::MoveTo { x: 6, y: 6 },
+    PathCmd::LineTo { x: 8, y: 8 },
+    PathCmd::MoveTo { x: 16, y: 16 },
+    PathCmd::LineTo { x: 18, y: 18 },
+    PathCmd::MoveTo { x: 18, y: 6 },
+    PathCmd::LineTo { x: 16, y: 8 },
+    PathCmd::MoveTo { x: 8, y: 16 },
+    PathCmd::LineTo { x: 6, y: 18 },
+    PathCmd::MoveTo { x: 12, y: 8 },
+    PathCmd::QuadTo {
+        cx: 16,
+        cy: 8,
+        x: 16,
+        y: 12,
+    },
+    PathCmd::QuadTo {
+        cx: 16,
+        cy: 16,
+        x: 12,
+        y: 16,
+    },
+    PathCmd::QuadTo {
+        cx: 8,
+        cy: 16,
+        x: 8,
+        y: 12,
+    },
+    PathCmd::QuadTo {
+        cx: 8,
+        cy: 8,
+        x: 12,
+        y: 8,
+    },
+    PathCmd::Close,
+];
+
+const ICON_CHECK_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 5, y: 13 },
+    PathCmd::LineTo { x: 10, y: 18 },
+    PathCmd::LineTo { x: 19, y: 6 },
+];
+
+const ICON_CLOSE_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 6, y: 6 },
+    PathCmd::LineTo { x: 18, y: 18 },
+    PathCmd::MoveTo { x: 18, y: 6 },
+    PathCmd::LineTo { x: 6, y: 18 },
+];
+
+const ICON_CHEVRON_RIGHT_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 9, y: 6 },
+    PathCmd::LineTo { x: 15, y: 12 },
+    PathCmd::LineTo { x: 9, y: 18 },
+];
+
+const ICON_CHEVRON_DOWN_COMMANDS: &[PathCmd] = &[
+    PathCmd::MoveTo { x: 6, y: 9 },
+    PathCmd::LineTo { x: 12, y: 15 },
+    PathCmd::LineTo { x: 18, y: 9 },
+];
+
+impl IconId {
+    /// Los 11 íconos estándar del catálogo v1.
+    pub const ALL: [Self; 11] = [
+        Self::Play,
+        Self::Pause,
+        Self::NextTrack,
+        Self::PreviousTrack,
+        Self::Volume,
+        Self::VolumeMute,
+        Self::Settings,
+        Self::Check,
+        Self::Close,
+        Self::ChevronRight,
+        Self::ChevronDown,
+    ];
+
+    /// Devuelve la lista estática de comandos [`PathCmd`] en grilla `24 × 24` para este ícono.
+    ///
+    /// Si el ícono es [`IconId::Unknown`] (o una variante futura desconocida), devuelve
+    /// [`UNKNOWN_ICON_COMMANDS`].
+    #[must_use]
+    pub const fn commands(self) -> &'static [PathCmd] {
+        match self {
+            Self::Play => ICON_PLAY_COMMANDS,
+            Self::Pause => ICON_PAUSE_COMMANDS,
+            Self::NextTrack => ICON_NEXT_TRACK_COMMANDS,
+            Self::PreviousTrack => ICON_PREV_TRACK_COMMANDS,
+            Self::Volume => ICON_VOLUME_COMMANDS,
+            Self::VolumeMute => ICON_VOLUME_MUTE_COMMANDS,
+            Self::Settings => ICON_SETTINGS_COMMANDS,
+            Self::Check => ICON_CHECK_COMMANDS,
+            Self::Close => ICON_CLOSE_COMMANDS,
+            Self::ChevronRight => ICON_CHEVRON_RIGHT_COMMANDS,
+            Self::ChevronDown => ICON_CHEVRON_DOWN_COMMANDS,
+            #[allow(unreachable_patterns)]
+            Self::Unknown(_) | _ => UNKNOWN_ICON_COMMANDS,
+        }
+    }
 }
 
 /// Modo de dimensionamiento de un nodo en un eje (modelo flex simple).
@@ -481,6 +764,8 @@ pub struct Node {
     pub height: Length,
     /// Relleno interno lógico.
     pub padding: Edges,
+    /// Color de fondo opcional del nodo o contenedor (`Box` / `Row` / `Column`).
+    pub background: Option<Tone>,
     /// Especie del widget y sus propiedades específicas.
     pub kind: WidgetKind,
 }
@@ -578,6 +863,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             padding: Edges::ZERO,
+            background: None,
             kind,
         }
     }
@@ -642,6 +928,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             padding,
+            background: None,
             kind: WidgetKind::Column {
                 gap: 0,
                 main_align: MainAlign::Start,
@@ -659,6 +946,7 @@ impl Node {
             width: Length::Fill(weight),
             height: Length::Fill(weight),
             padding: Edges::ZERO,
+            background: None,
             kind: WidgetKind::Spacer,
         }
     }
@@ -671,6 +959,7 @@ impl Node {
             width: Length::Fixed(width),
             height: Length::Fixed(height),
             padding: Edges::ZERO,
+            background: None,
             kind: WidgetKind::Spacer,
         }
     }
@@ -689,6 +978,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             padding: Edges::ZERO,
+            background: None,
             kind: WidgetKind::Button {
                 label,
                 icon,
@@ -717,6 +1007,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             padding: Edges::ZERO,
+            background: None,
             kind: WidgetKind::Toggle { checked, enabled },
         }
     }
@@ -729,6 +1020,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             padding: Edges::ZERO,
+            background: None,
             kind: WidgetKind::Slider { value, enabled },
         }
     }
@@ -790,6 +1082,13 @@ impl Node {
     #[must_use]
     pub const fn with_padding(mut self, padding: Edges) -> Self {
         self.padding = padding;
+        self
+    }
+
+    /// Asigna un tono de color de fondo al nodo o contenedor (`Box` / `Row` / `Column`).
+    #[must_use]
+    pub const fn with_background(mut self, background: Tone) -> Self {
+        self.background = Some(background);
         self
     }
 }
@@ -1004,6 +1303,33 @@ pub trait TextMeasurer {
     fn measure_line(&mut self, text: &str, size_px: u32) -> Size;
 }
 
+impl TextMeasurer for atoll_render::TextRenderer {
+    fn measure_line(&mut self, text: &str, size_px: u32) -> Size {
+        if size_px == 0 || text.is_empty() {
+            return Size::new(0, size_px);
+        }
+        let clamped_px = (size_px.min(512)) as f32;
+        let width_f = self.measure(text, clamped_px).unwrap_or(0.0);
+        let width = if width_f.is_finite() && width_f > 0.0 {
+            width_f.ceil() as u32
+        } else {
+            0
+        };
+        let height = self
+            .line_metrics(clamped_px)
+            .map(|m| {
+                let h = (m.ascent - m.descent).ceil();
+                if h.is_finite() && h > 0.0 {
+                    (h as u32).max(size_px)
+                } else {
+                    size_px
+                }
+            })
+            .unwrap_or(size_px);
+        Size::new(width, height)
+    }
+}
+
 /// Datos específicos de un nodo ya resueltos a coordenadas físicas en el [`LayoutTree`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutKind {
@@ -1077,6 +1403,8 @@ pub struct LayoutNode {
     pub rect: Rect,
     /// Caja interna de contenido física (`rect` menos `padding` escalado), siempre dentro de `rect`.
     pub content_rect: Rect,
+    /// Tono de fondo opcional heredado de [`Node::background`].
+    pub background: Option<Tone>,
     /// Especie resuelta del nodo.
     pub kind: LayoutKind,
 }
@@ -1386,6 +1714,7 @@ fn place_node_recursive(
         id: node.id,
         rect,
         content_rect,
+        background: node.background,
         kind: LayoutKind::Spacer,
     });
 
@@ -2266,6 +2595,933 @@ impl UiState {
     }
 }
 
+// ============================================================================
+// Capa 4: Tema, paleta y pintado determinista sobre atoll-render::Frame
+// ============================================================================
+
+/// Radio de esquina lógico (a 96 DPI) de `Button` e `IconButton`.
+const BUTTON_CORNER_RADIUS_PX: f32 = 7.0;
+
+/// Grosor de trazo lógico (a 96 DPI) de los íconos vectoriales en la grilla `24x24`.
+const ICON_STROKE_WIDTH_PX: f32 = 1.85;
+
+/// Paleta de colores resuelta a partir de [`atoll_config::AppearanceSection`].
+///
+/// Es el único punto de `atoll-ui` donde se derivan los colores del tema para
+/// todos los widgets y sus estados (`normal`, `hover`, `pressed`, `disabled`),
+/// usando exclusivamente aritmética entera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemePalette {
+    /// Fondo principal de la superficie (con la opacidad general aplicada).
+    pub background: Rgba,
+    /// Color principal de texto e íconos ([`Tone::Primary`]).
+    pub text_primary: Rgba,
+    /// Color secundario de texto e íconos ([`Tone::Muted`], 75 % del alfa de `text_primary`).
+    pub text_muted: Rgba,
+    /// Color de texto e íconos en controles deshabilitados (42 % del alfa de `text_primary`).
+    pub text_disabled: Rgba,
+    /// Color de acento derivado del preset (`#0A84FF` en `black`/`graphite`, `#0066CC` en `white`).
+    pub accent: Rgba,
+    /// Color de acento en estado `hover`.
+    pub accent_hover: Rgba,
+    /// Color de acento en estado `pressed` (`active`).
+    pub accent_active: Rgba,
+    /// Color de acento en estado `disabled`.
+    pub accent_disabled: Rgba,
+    /// Color de texto o ícono sobre fondo `accent` ([`ButtonVariant::Primary`]).
+    pub on_accent: Rgba,
+    /// Color de texto o ícono sobre fondo `accent_disabled`.
+    pub on_accent_disabled: Rgba,
+    /// Superficie de controles secundarios o pistas en reposo (`normal`).
+    pub control_bg: Rgba,
+    /// Superficie de controles secundarios en estado `hover`.
+    pub control_hover_bg: Rgba,
+    /// Superficie de controles secundarios en estado `pressed` (`active`).
+    pub control_active_bg: Rgba,
+    /// Superficie de controles secundarios en estado `disabled`.
+    pub control_disabled_bg: Rgba,
+    /// Superficie de botones [`ButtonVariant::Ghost`] en estado `hover`.
+    pub ghost_hover_bg: Rgba,
+    /// Superficie de botones [`ButtonVariant::Ghost`] en estado `pressed` (`active`).
+    pub ghost_active_bg: Rgba,
+    /// Color de la perilla (`knob`) de `Toggle` y `Slider` habilitados.
+    pub knob: Rgba,
+    /// Color de la perilla (`knob`) de `Toggle` y `Slider` deshabilitados.
+    pub knob_disabled: Rgba,
+    /// Color de las líneas divisorias (`Separator` / `Divider`).
+    pub separator: Rgba,
+}
+
+impl ThemePalette {
+    /// Deriva la paleta completa a partir de la sección `[appearance]` de `atoll-config`.
+    ///
+    /// - Aplica la opacidad general (`0..=100`) con redondeo entero.
+    /// - Deriva `accent` del preset (`#0A84FF` en `black` y `graphite`, `#0066CC` en `white`).
+    /// - Deriva los estados `normal`, `hover`, `pressed` (`active`) y `disabled` mediante
+    ///   mezcla entera [`Rgba::blend_integer`].
+    #[must_use]
+    pub const fn from_appearance(appearance: &atoll_config::AppearanceSection) -> Self {
+        let opacity = appearance.opacity;
+        let background = apply_opacity_pct(Rgba::from_config_color(appearance.background), opacity);
+        let text_primary =
+            apply_opacity_pct(Rgba::from_config_color(appearance.text_color), opacity);
+        let text_muted = scale_alpha_permille(text_primary, 750);
+        let text_disabled = scale_alpha_permille(text_primary, 420);
+
+        let base_accent = match appearance.theme {
+            atoll_config::Theme::Black | atoll_config::Theme::Graphite => {
+                Rgba::rgb(0x0A, 0x84, 0xFF)
+            }
+            atoll_config::Theme::White => Rgba::rgb(0x00, 0x66, 0xCC),
+        };
+        let accent = apply_opacity_pct(base_accent, opacity);
+        let accent_hover = accent.blend_integer(Rgba::WHITE.with_alpha(accent.a), 180);
+        let accent_active = accent.blend_integer(Rgba::BLACK.with_alpha(accent.a), 220);
+        let accent_disabled = accent.blend_integer(background, 550);
+
+        let on_accent = apply_opacity_pct(Rgba::WHITE, opacity);
+        let on_accent_disabled = scale_alpha_permille(on_accent, 550);
+
+        let control_bg = background.blend_integer(text_primary, 140);
+        let control_hover_bg = background.blend_integer(text_primary, 240);
+        let control_active_bg = background.blend_integer(text_primary, 340);
+        let control_disabled_bg = background.blend_integer(text_primary, 70);
+
+        let ghost_hover_bg = scale_alpha_permille(text_primary, 140);
+        let ghost_active_bg = scale_alpha_permille(text_primary, 240);
+
+        let knob = apply_opacity_pct(Rgba::WHITE, opacity);
+        let knob_disabled = knob.blend_integer(background, 450);
+
+        let separator = background.blend_integer(text_primary, 180);
+
+        Self {
+            background,
+            text_primary,
+            text_muted,
+            text_disabled,
+            accent,
+            accent_hover,
+            accent_active,
+            accent_disabled,
+            on_accent,
+            on_accent_disabled,
+            control_bg,
+            control_hover_bg,
+            control_active_bg,
+            control_disabled_bg,
+            ghost_hover_bg,
+            ghost_active_bg,
+            knob,
+            knob_disabled,
+            separator,
+        }
+    }
+
+    /// Resuelve un [`Tone`] semántico a su color [`Rgba`] concreto dentro de esta paleta.
+    #[must_use]
+    pub const fn resolve_tone(&self, tone: Tone) -> Rgba {
+        match tone {
+            Tone::Primary => self.text_primary,
+            Tone::Muted => self.text_muted,
+            Tone::Accent => self.accent,
+            Tone::Custom(c) => c,
+        }
+    }
+}
+
+const fn apply_opacity_pct(color: Rgba, opacity_pct: u8) -> Rgba {
+    let pct = if opacity_pct > 100 {
+        100
+    } else {
+        opacity_pct as u32
+    };
+    let a = ((color.a as u32 * pct + 50) / 100) as u8;
+    Rgba::new(color.r, color.g, color.b, a)
+}
+
+const fn scale_alpha_permille(color: Rgba, permille: u16) -> Rgba {
+    let p = if permille > 1000 {
+        1000
+    } else {
+        permille as u32
+    };
+    let a = ((color.a as u32 * p + 500) / 1000) as u8;
+    Rgba::new(color.r, color.g, color.b, a)
+}
+
+/// Calcula la razón de contraste WCAG 2.1 (`1.0..=21.0`) entre dos colores `a` y `b`
+/// a partir de su luminancia relativa sRGB.
+#[must_use]
+pub fn wcag_contrast_ratio(a: Rgba, b: Rgba) -> f32 {
+    let lum_a = relative_luminance(a);
+    let lum_b = relative_luminance(b);
+    let (lighter, darker) = if lum_a >= lum_b {
+        (lum_a, lum_b)
+    } else {
+        (lum_b, lum_a)
+    };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+fn relative_luminance(color: Rgba) -> f32 {
+    fn channel_linear(c: u8) -> f32 {
+        let s = f32::from(c) / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel_linear(color.r)
+        + 0.7152 * channel_linear(color.g)
+        + 0.0722 * channel_linear(color.b)
+}
+
+/// Convierte un [`Rect`] de `atoll-ui` en un [`atoll_render::ClipRect`].
+#[must_use]
+const fn to_clip_rect(rect: Rect) -> atoll_render::ClipRect {
+    atoll_render::ClipRect::new(rect.x, rect.y, rect.width, rect.height)
+}
+
+/// Dibuja el árbol `(tree, layout)` sobre `frame` aplicando `ui_state`, `palette` y `scale`.
+///
+/// - Respeta el recorte jerárquico: cada hijo se recorta estrictamente al `content_rect`
+///   de todos sus contenedores ancestros y a los límites físicos de `frame`.
+/// - Si el árbol contiene texto (`Label` o `Button` con etiqueta), inicializa un
+///   [`atoll_render::TextRenderer`] bajo demanda; si no hay texto, no carga la fuente
+///   ni realiza asignaciones adicionales.
+/// - Quienes ya posean un [`atoll_render::TextRenderer`] persistente pueden usar
+///   [`paint_tree_with_text`] para reutilizar su caché de glifos entre cuadros.
+pub fn paint_tree(
+    tree: &Node,
+    layout: &LayoutTree,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    frame: &mut atoll_render::Frame,
+) {
+    let mut lazy_text: Option<atoll_render::TextRenderer> = None;
+    paint_tree_impl(
+        tree,
+        layout,
+        ui_state,
+        palette,
+        scale,
+        frame,
+        &mut lazy_text,
+    );
+}
+
+/// Igual que [`paint_tree`], reutilizando un [`atoll_render::TextRenderer`] provisto por el llamador.
+pub fn paint_tree_with_text(
+    tree: &Node,
+    layout: &LayoutTree,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    frame: &mut atoll_render::Frame,
+    text_renderer: &mut atoll_render::TextRenderer,
+) {
+    let norm_scale = normalize_paint_scale(scale, layout.scale_milli);
+    let scale_milli = normalize_scale_milli(norm_scale);
+    let fsize = frame.size();
+    let frame_bounds = Rect::new(0, 0, fsize.width, fsize.height);
+    let root_clip = frame_bounds.intersect(Rect::from_size(layout.available));
+
+    let mut slot = TextSlot::Borrowed(text_renderer);
+    paint_node_recursive(
+        tree,
+        0,
+        root_clip,
+        layout,
+        ui_state,
+        palette,
+        norm_scale,
+        scale_milli,
+        frame,
+        &mut slot,
+        1,
+    );
+}
+
+enum TextSlot<'a> {
+    Lazy(&'a mut Option<atoll_render::TextRenderer>),
+    Borrowed(&'a mut atoll_render::TextRenderer),
+}
+
+impl TextSlot<'_> {
+    fn get_mut(&mut self) -> Option<&mut atoll_render::TextRenderer> {
+        match self {
+            Self::Lazy(opt) => {
+                if opt.is_none() {
+                    **opt = atoll_render::TextRenderer::new().ok();
+                }
+                opt.as_mut()
+            }
+            Self::Borrowed(r) => Some(*r),
+        }
+    }
+}
+
+fn normalize_paint_scale(scale: f32, layout_scale_milli: u32) -> f32 {
+    if scale.is_finite() && scale > 0.0 {
+        scale.clamp(0.25, 8.0)
+    } else if layout_scale_milli > 0 {
+        (layout_scale_milli as f32 / 1000.0).clamp(0.25, 8.0)
+    } else {
+        1.0
+    }
+}
+
+fn paint_tree_impl(
+    tree: &Node,
+    layout: &LayoutTree,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    frame: &mut atoll_render::Frame,
+    lazy_text: &mut Option<atoll_render::TextRenderer>,
+) {
+    let norm_scale = normalize_paint_scale(scale, layout.scale_milli);
+    let scale_milli = normalize_scale_milli(norm_scale);
+    let fsize = frame.size();
+    let frame_bounds = Rect::new(0, 0, fsize.width, fsize.height);
+    let root_clip = frame_bounds.intersect(Rect::from_size(layout.available));
+
+    let mut slot = TextSlot::Lazy(lazy_text);
+    paint_node_recursive(
+        tree,
+        0,
+        root_clip,
+        layout,
+        ui_state,
+        palette,
+        norm_scale,
+        scale_milli,
+        frame,
+        &mut slot,
+        1,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_node_recursive(
+    node: &Node,
+    layout_idx: usize,
+    clip: Rect,
+    layout: &LayoutTree,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    scale_milli: u32,
+    frame: &mut atoll_render::Frame,
+    text_slot: &mut TextSlot<'_>,
+    depth: usize,
+) {
+    if depth > MAX_TREE_DEPTH || clip.is_empty() {
+        return;
+    }
+    let Some(lnode) = layout.nodes.get(layout_idx) else {
+        return;
+    };
+    let visible_rect = clip.intersect(lnode.rect);
+    if visible_rect.is_empty() {
+        return;
+    }
+
+    // 1. Si el nodo tiene un color de fondo configurado (`Box` o contenedor con `with_background`),
+    // lo pintamos dentro de `lnode.rect` recortado a `visible_rect`.
+    if let Some(bg_tone) = node.background.or(lnode.background) {
+        let bg_color = palette.resolve_tone(bg_tone);
+        if bg_color.a > 0 {
+            frame.fill_rounded_rect(
+                to_clip_rect(lnode.rect),
+                atoll_render::CornerRadii::uniform(0.0),
+                bg_color.to_render_color(),
+                to_clip_rect(visible_rect),
+            );
+        }
+    }
+
+    let content_clip = visible_rect.intersect(lnode.content_rect);
+
+    match (&node.kind, &lnode.kind) {
+        (
+            WidgetKind::Row { children, .. } | WidgetKind::Column { children, .. },
+            LayoutKind::Container {
+                children: layout_children,
+            },
+        ) => {
+            if content_clip.is_empty() {
+                return;
+            }
+            for (child_node, &child_idx) in children.iter().zip(layout_children.iter()) {
+                paint_node_recursive(
+                    child_node,
+                    child_idx,
+                    content_clip,
+                    layout,
+                    ui_state,
+                    palette,
+                    scale,
+                    scale_milli,
+                    frame,
+                    text_slot,
+                    depth + 1,
+                );
+            }
+        }
+        (
+            _,
+            LayoutKind::Label {
+                text,
+                size_px,
+                tone,
+            },
+        ) => {
+            if text.is_empty() || content_clip.is_empty() || *size_px == 0 {
+                return;
+            }
+            let color = palette.resolve_tone(*tone);
+            if color.a == 0 {
+                return;
+            }
+            if let Some(tr) = text_slot.get_mut() {
+                draw_text_centered_y(
+                    frame,
+                    tr,
+                    text,
+                    lnode.content_rect.x as f32,
+                    lnode.content_rect,
+                    *size_px,
+                    color.to_render_color(),
+                    content_clip,
+                );
+            }
+        }
+        (
+            _,
+            LayoutKind::Icon {
+                icon,
+                size_px,
+                tone,
+            },
+        ) => {
+            if content_clip.is_empty() || *size_px == 0 {
+                return;
+            }
+            let color = palette.resolve_tone(*tone);
+            if color.a == 0 {
+                return;
+            }
+            let side = (*size_px)
+                .min(lnode.content_rect.width)
+                .min(lnode.content_rect.height);
+            if side == 0 {
+                return;
+            }
+            let ix = lnode
+                .content_rect
+                .x
+                .saturating_add_unsigned(lnode.content_rect.width.saturating_sub(side) / 2);
+            let iy = lnode
+                .content_rect
+                .y
+                .saturating_add_unsigned(lnode.content_rect.height.saturating_sub(side) / 2);
+            let icon_rect = Rect::new(ix, iy, side, side);
+            frame.stroke_path(
+                to_clip_rect(icon_rect),
+                icon.commands(),
+                ICON_STROKE_WIDTH_PX,
+                color.to_render_color(),
+                scale,
+                to_clip_rect(content_clip),
+            );
+        }
+        (_, LayoutKind::Separator) => {
+            if content_clip.is_empty() {
+                return;
+            }
+            let color = palette.separator;
+            if color.a > 0 {
+                frame.fill_rounded_rect(
+                    to_clip_rect(lnode.content_rect),
+                    atoll_render::CornerRadii::uniform(0.0),
+                    color.to_render_color(),
+                    to_clip_rect(content_clip),
+                );
+            }
+        }
+        (_, LayoutKind::Progress { value, tone }) => {
+            paint_progress_bar(
+                frame,
+                lnode.content_rect,
+                content_clip,
+                *value,
+                *tone,
+                palette,
+            );
+        }
+        (
+            _,
+            LayoutKind::Button {
+                label,
+                icon,
+                variant,
+                enabled,
+            },
+        ) => {
+            paint_button(
+                frame,
+                text_slot,
+                lnode.id,
+                lnode.rect,
+                lnode.content_rect,
+                visible_rect,
+                content_clip,
+                label.as_deref(),
+                *icon,
+                *variant,
+                *enabled,
+                ui_state,
+                palette,
+                scale,
+                scale_milli,
+            );
+        }
+        (_, LayoutKind::Toggle { checked, enabled }) => {
+            paint_toggle(
+                frame,
+                lnode.id,
+                lnode.content_rect,
+                content_clip,
+                *checked,
+                *enabled,
+                ui_state,
+                palette,
+                scale_milli,
+            );
+        }
+        (_, LayoutKind::Slider { value, enabled }) => {
+            paint_slider(
+                frame,
+                lnode.id,
+                lnode.content_rect,
+                content_clip,
+                *value,
+                *enabled,
+                ui_state,
+                palette,
+                scale_milli,
+            );
+        }
+        (_, LayoutKind::Spacer | LayoutKind::Container { .. }) => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text_centered_y(
+    frame: &mut atoll_render::Frame,
+    text_renderer: &mut atoll_render::TextRenderer,
+    text: &str,
+    x: f32,
+    box_rect: Rect,
+    size_px: u32,
+    color: atoll_render::Color,
+    clip: Rect,
+) {
+    if text.is_empty() || box_rect.is_empty() || clip.is_empty() || size_px == 0 {
+        return;
+    }
+    let font_px = (size_px.min(512)) as f32;
+    let vertical_offset = text_renderer
+        .line_metrics(font_px)
+        .map(|m| m.ascent + m.descent)
+        .unwrap_or(font_px * 0.72);
+    let baseline = box_rect.y as f32 + (box_rect.height as f32 + vertical_offset) / 2.0;
+    let _ =
+        text_renderer.draw_clipped(frame, text, x, baseline, font_px, color, to_clip_rect(clip));
+}
+
+fn paint_progress_bar(
+    frame: &mut atoll_render::Frame,
+    track: Rect,
+    clip: Rect,
+    value: Permille,
+    tone: Tone,
+    palette: &ThemePalette,
+) {
+    if track.is_empty() || clip.is_empty() {
+        return;
+    }
+    let radius = (track.height.min(track.width) as f32) / 2.0;
+    let radii = atoll_render::CornerRadii::uniform(radius);
+
+    if palette.control_bg.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(track),
+            radii,
+            palette.control_bg.to_render_color(),
+            to_clip_rect(clip),
+        );
+    }
+
+    let raw = u64::from(value.raw());
+    if raw == 0 {
+        return;
+    }
+    let mut fill_w = ((u64::from(track.width) * raw + 500) / 1000) as u32;
+    if fill_w == 0 && track.width > 0 {
+        fill_w = 1;
+    }
+    fill_w = fill_w.min(track.width);
+
+    let fill_rect = Rect::new(track.x, track.y, fill_w, track.height);
+    let fill_clip = clip.intersect(fill_rect);
+    let fill_color = palette.resolve_tone(tone);
+    if !fill_clip.is_empty() && fill_color.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(fill_rect),
+            radii,
+            fill_color.to_render_color(),
+            to_clip_rect(fill_clip),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_button(
+    frame: &mut atoll_render::Frame,
+    text_slot: &mut TextSlot<'_>,
+    id: WidgetId,
+    rect: Rect,
+    content_rect: Rect,
+    visible_rect: Rect,
+    content_clip: Rect,
+    label: Option<&str>,
+    icon: Option<IconId>,
+    variant: ButtonVariant,
+    enabled: bool,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale: f32,
+    scale_milli: u32,
+) {
+    if rect.is_empty() || visible_rect.is_empty() {
+        return;
+    }
+
+    let is_pressed = enabled && ui_state.is_pressed(id);
+    let is_hovered = enabled && ui_state.is_hovered(id);
+
+    let (bg_color, fg_color) = match variant {
+        ButtonVariant::Primary => {
+            if !enabled {
+                (palette.accent_disabled, palette.on_accent_disabled)
+            } else if is_pressed {
+                (palette.accent_active, palette.on_accent)
+            } else if is_hovered {
+                (palette.accent_hover, palette.on_accent)
+            } else {
+                (palette.accent, palette.on_accent)
+            }
+        }
+        ButtonVariant::Secondary => {
+            if !enabled {
+                (palette.control_disabled_bg, palette.text_disabled)
+            } else if is_pressed {
+                (palette.control_active_bg, palette.text_primary)
+            } else if is_hovered {
+                (palette.control_hover_bg, palette.text_primary)
+            } else {
+                (palette.control_bg, palette.text_primary)
+            }
+        }
+        ButtonVariant::Ghost => {
+            if !enabled {
+                (Rgba::TRANSPARENT, palette.text_disabled)
+            } else if is_pressed {
+                (palette.ghost_active_bg, palette.text_primary)
+            } else if is_hovered {
+                (palette.ghost_hover_bg, palette.text_primary)
+            } else {
+                (Rgba::TRANSPARENT, palette.text_primary)
+            }
+        }
+    };
+
+    if bg_color.a > 0 {
+        let max_r = (rect.width.min(rect.height) as f32) / 2.0;
+        let r = (BUTTON_CORNER_RADIUS_PX * scale).min(max_r);
+        frame.fill_rounded_rect(
+            to_clip_rect(rect),
+            atoll_render::CornerRadii::uniform(r),
+            bg_color.to_render_color(),
+            to_clip_rect(visible_rect),
+        );
+    }
+
+    if content_clip.is_empty() || fg_color.a == 0 {
+        return;
+    }
+
+    let non_empty_label = label.filter(|s| !s.is_empty());
+    let icon_side = if icon.is_some() {
+        scale_logical_px(BUTTON_ICON_PX, scale_milli)
+            .min(content_rect.width)
+            .min(content_rect.height)
+    } else {
+        0
+    };
+    let text_px = scale_logical_px(BUTTON_TEXT_PX, scale_milli).max(1);
+
+    let text_width = match non_empty_label {
+        Some(text) => text_slot
+            .get_mut()
+            .and_then(|tr| tr.measure(text, (text_px.min(512)) as f32).ok())
+            .map(|w| {
+                if w.is_finite() && w > 0.0 {
+                    w.ceil() as u32
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0),
+        None => 0,
+    };
+
+    let inner_gap = if icon_side > 0 && text_width > 0 {
+        scale_logical_px(BUTTON_GAP_PX, scale_milli)
+    } else {
+        0
+    };
+    let total_w = icon_side
+        .saturating_add(inner_gap)
+        .saturating_add(text_width);
+    let start_x = content_rect
+        .x
+        .saturating_add_unsigned(content_rect.width.saturating_sub(total_w) / 2);
+
+    if let Some(icon_id) = icon {
+        if icon_side > 0 {
+            let iy = content_rect
+                .y
+                .saturating_add_unsigned(content_rect.height.saturating_sub(icon_side) / 2);
+            let icon_rect = Rect::new(start_x, iy, icon_side, icon_side);
+            frame.stroke_path(
+                to_clip_rect(icon_rect),
+                icon_id.commands(),
+                ICON_STROKE_WIDTH_PX,
+                fg_color.to_render_color(),
+                scale,
+                to_clip_rect(content_clip),
+            );
+        }
+    }
+
+    if let Some(text) = non_empty_label {
+        let text_x = start_x.saturating_add_unsigned(icon_side.saturating_add(inner_gap));
+        if let Some(tr) = text_slot.get_mut() {
+            draw_text_centered_y(
+                frame,
+                tr,
+                text,
+                text_x as f32,
+                content_rect,
+                text_px,
+                fg_color.to_render_color(),
+                content_clip,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_toggle(
+    frame: &mut atoll_render::Frame,
+    id: WidgetId,
+    track: Rect,
+    clip: Rect,
+    checked: bool,
+    enabled: bool,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale_milli: u32,
+) {
+    if track.is_empty() || clip.is_empty() {
+        return;
+    }
+
+    let is_pressed = enabled && ui_state.is_pressed(id);
+    let is_hovered = enabled && ui_state.is_hovered(id);
+
+    let track_color = if !enabled {
+        if checked {
+            palette.accent_disabled
+        } else {
+            palette.control_disabled_bg
+        }
+    } else if is_pressed {
+        if checked {
+            palette.accent_active
+        } else {
+            palette.control_active_bg
+        }
+    } else if is_hovered {
+        if checked {
+            palette.accent_hover
+        } else {
+            palette.control_hover_bg
+        }
+    } else if checked {
+        palette.accent
+    } else {
+        palette.control_bg
+    };
+
+    let track_r = (track.height.min(track.width) as f32) / 2.0;
+    if track_color.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(track),
+            atoll_render::CornerRadii::uniform(track_r),
+            track_color.to_render_color(),
+            to_clip_rect(clip),
+        );
+    }
+
+    let pad = scale_logical_px(2, scale_milli)
+        .max(1)
+        .min(track.height / 4);
+    let knob_d = track
+        .height
+        .saturating_sub(pad.saturating_mul(2))
+        .min(track.width.saturating_sub(pad.saturating_mul(2)));
+    if knob_d == 0 {
+        return;
+    }
+    let knob_y = track
+        .y
+        .saturating_add_unsigned(track.height.saturating_sub(knob_d) / 2);
+    let knob_x = if checked {
+        track
+            .x
+            .saturating_add_unsigned(track.width.saturating_sub(pad.saturating_add(knob_d)))
+    } else {
+        track.x.saturating_add_unsigned(pad)
+    };
+    let knob_rect = Rect::new(knob_x, knob_y, knob_d, knob_d);
+    let knob_color = if enabled {
+        palette.knob
+    } else {
+        palette.knob_disabled
+    };
+    if knob_color.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(knob_rect),
+            atoll_render::CornerRadii::uniform(knob_d as f32 / 2.0),
+            knob_color.to_render_color(),
+            to_clip_rect(clip),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_slider(
+    frame: &mut atoll_render::Frame,
+    id: WidgetId,
+    area: Rect,
+    clip: Rect,
+    value: Permille,
+    enabled: bool,
+    ui_state: &UiState,
+    palette: &ThemePalette,
+    scale_milli: u32,
+) {
+    if area.is_empty() || clip.is_empty() {
+        return;
+    }
+
+    let track_h = scale_logical_px(4, scale_milli).max(2).min(area.height);
+    let track_y = area
+        .y
+        .saturating_add_unsigned(area.height.saturating_sub(track_h) / 2);
+    let track_rect = Rect::new(area.x, track_y, area.width, track_h);
+    let track_r = (track_h as f32) / 2.0;
+    let track_radii = atoll_render::CornerRadii::uniform(track_r);
+
+    let track_bg = if enabled {
+        palette.control_bg
+    } else {
+        palette.control_disabled_bg
+    };
+    if track_bg.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(track_rect),
+            track_radii,
+            track_bg.to_render_color(),
+            to_clip_rect(clip),
+        );
+    }
+
+    let fill_color = if !enabled {
+        palette.accent_disabled
+    } else if ui_state.is_active(id) {
+        palette.accent_active
+    } else if ui_state.is_hovered(id) {
+        palette.accent_hover
+    } else {
+        palette.accent
+    };
+
+    let raw = u64::from(value.raw());
+    if raw > 0 && fill_color.a > 0 {
+        let mut fill_w = ((u64::from(track_rect.width) * raw + 500) / 1000) as u32;
+        if fill_w == 0 && track_rect.width > 0 {
+            fill_w = 1;
+        }
+        fill_w = fill_w.min(track_rect.width);
+        let fill_rect = Rect::new(track_rect.x, track_rect.y, fill_w, track_rect.height);
+        let fill_clip = clip.intersect(fill_rect);
+        if !fill_clip.is_empty() {
+            frame.fill_rounded_rect(
+                to_clip_rect(fill_rect),
+                track_radii,
+                fill_color.to_render_color(),
+                to_clip_rect(fill_clip),
+            );
+        }
+    }
+
+    let knob_d = scale_logical_px(12, scale_milli)
+        .max(4)
+        .min(area.height)
+        .min(area.width);
+    if knob_d == 0 {
+        return;
+    }
+    let travel = area.width.saturating_sub(knob_d);
+    let knob_offset = ((u64::from(travel) * raw + 500) / 1000) as u32;
+    let knob_x = area.x.saturating_add_unsigned(knob_offset);
+    let knob_y = area
+        .y
+        .saturating_add_unsigned(area.height.saturating_sub(knob_d) / 2);
+    let knob_rect = Rect::new(knob_x, knob_y, knob_d, knob_d);
+    let knob_color = if enabled {
+        palette.knob
+    } else {
+        palette.knob_disabled
+    };
+    if knob_color.a > 0 {
+        frame.fill_rounded_rect(
+            to_clip_rect(knob_rect),
+            atoll_render::CornerRadii::uniform(knob_d as f32 / 2.0),
+            knob_color.to_render_color(),
+            to_clip_rect(clip),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::size_of;
@@ -2769,6 +4025,7 @@ mod tests {
                 width: self.next_length(),
                 height: self.next_length(),
                 padding: self.next_edges(),
+                background: None,
                 kind,
             }
         }
@@ -3552,5 +4809,637 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ========================================================================
+    // Tests de Capa 4: tema, íconos y pintado exacto sobre Frame
+    // ========================================================================
+
+    fn default_palette_for(theme: atoll_config::Theme) -> super::ThemePalette {
+        let mut cfg = atoll_config::Config::default();
+        cfg.appearance.theme = theme;
+        match theme {
+            atoll_config::Theme::Black => {
+                cfg.appearance.background = atoll_config::Color::rgba(0x00, 0x00, 0x00, 0xFF);
+                cfg.appearance.text_color = atoll_config::Color::rgba(0xFF, 0xFF, 0xFF, 0xFF);
+            }
+            atoll_config::Theme::Graphite => {
+                cfg.appearance.background = atoll_config::Color::rgba(0x1C, 0x1C, 0x1E, 0xFF);
+                cfg.appearance.text_color = atoll_config::Color::rgba(0xF5, 0xF5, 0xF7, 0xFF);
+            }
+            atoll_config::Theme::White => {
+                cfg.appearance.background = atoll_config::Color::rgba(0xF5, 0xF5, 0xF7, 0xFF);
+                cfg.appearance.text_color = atoll_config::Color::rgba(0x1C, 0x1C, 0x1E, 0xFF);
+            }
+        }
+        super::ThemePalette::from_appearance(&cfg.appearance)
+    }
+
+    fn pixel_at(frame: &atoll_render::Frame, x: u32, y: u32) -> [u8; 4] {
+        let w = frame.size().width as usize;
+        let idx = (y as usize * w + x as usize) * 4;
+        let data = frame.rgba_premultiplied();
+        [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
+    }
+
+    fn count_non_zero_in_rect(frame: &atoll_render::Frame, rect: Rect) -> usize {
+        let mut count = 0usize;
+        let fsize = frame.size();
+        for y in 0..fsize.height {
+            for x in 0..fsize.width {
+                if rect.contains(x as i32, y as i32) && pixel_at(frame, x, y) != [0, 0, 0, 0] {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn count_non_zero_outside_rect(frame: &atoll_render::Frame, rect: Rect) -> usize {
+        let mut count = 0usize;
+        let fsize = frame.size();
+        for y in 0..fsize.height {
+            for x in 0..fsize.width {
+                if !rect.contains(x as i32, y as i32) && pixel_at(frame, x, y) != [0, 0, 0, 0] {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn assert_valid_premultiplied(frame: &atoll_render::Frame) {
+        for &[r, g, b, a] in frame.rgba_premultiplied().as_chunks::<4>().0 {
+            assert!(
+                r <= a && g <= a && b <= a,
+                "píxel con alfa premultiplicado inválido: r={r}, g={g}, b={b}, a={a}"
+            );
+        }
+    }
+
+    #[test]
+    fn wcag_contrast_between_text_and_background_meets_minimum_for_all_three_presets() {
+        for theme in [
+            atoll_config::Theme::Black,
+            atoll_config::Theme::Graphite,
+            atoll_config::Theme::White,
+        ] {
+            let palette = default_palette_for(theme);
+            let ratio = super::wcag_contrast_ratio(palette.text_primary, palette.background);
+            assert!(
+                ratio >= 7.0,
+                "el preset {theme:?} tiene contraste insuficiente: {ratio:.2} (esperado >= 7.0)"
+            );
+        }
+
+        // Además verificamos que el acento deriva exactamente del preset según la decisión 10.1.
+        let black_pal = default_palette_for(atoll_config::Theme::Black);
+        let graphite_pal = default_palette_for(atoll_config::Theme::Graphite);
+        let white_pal = default_palette_for(atoll_config::Theme::White);
+        assert_eq!(black_pal.accent, super::Rgba::rgb(0x0A, 0x84, 0xFF));
+        assert_eq!(graphite_pal.accent, super::Rgba::rgb(0x0A, 0x84, 0xFF));
+        assert_eq!(white_pal.accent, super::Rgba::rgb(0x00, 0x66, 0xCC));
+    }
+
+    #[test]
+    fn real_text_measurer_measures_labels_and_buttons_consistently() {
+        let mut tr = atoll_render::TextRenderer::new().expect("fuente embebida");
+        let s_short = tr.measure_line("09:05", 16);
+        let s_long = tr.measure_line("09:05 - Lun 14 Nov", 16);
+        assert!(s_short.width > 0 && s_short.height >= 16);
+        assert!(s_long.width > s_short.width);
+
+        let tree = Node::row(
+            8,
+            MainAlign::Start,
+            CrossAlign::Center,
+            vec![
+                Node::label("Hola", 14, Tone::Primary).with_id(WidgetId::new(1)),
+                Node::button(
+                    WidgetId::new(2),
+                    Some("Aceptar".to_owned()),
+                    Some(IconId::Check),
+                    ButtonVariant::Primary,
+                    true,
+                ),
+            ],
+        );
+        let layout = compute_layout(&tree, Size::new(300, 40), 1.0, &mut tr).expect("layout");
+        let lbl = layout.find_by_id(WidgetId::new(1)).expect("label");
+        let btn = layout.find_by_id(WidgetId::new(2)).expect("button");
+        assert!(lbl.rect.width > 0 && lbl.rect.height >= 14);
+        assert!(btn.rect.width > lbl.rect.width && btn.rect.height >= 28);
+    }
+
+    #[test]
+    fn toggle_on_vs_off_differs_in_track_color_and_knob_position() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Graphite);
+        let state = UiState::new();
+
+        let tree_off = Node::toggle(WidgetId::new(1), false, true);
+        let layout_off =
+            compute_layout(&tree_off, Size::new(60, 30), 1.0, &mut measurer).expect("layout off");
+        let mut frame_off =
+            atoll_render::Frame::new(atoll_render::Size::new(60, 30)).expect("frame off");
+        super::paint_tree(
+            &tree_off,
+            &layout_off,
+            &state,
+            &palette,
+            1.0,
+            &mut frame_off,
+        );
+
+        let tree_on = Node::toggle(WidgetId::new(1), true, true);
+        let layout_on =
+            compute_layout(&tree_on, Size::new(60, 30), 1.0, &mut measurer).expect("layout on");
+        let mut frame_on =
+            atoll_render::Frame::new(atoll_render::Size::new(60, 30)).expect("frame on");
+        super::paint_tree(&tree_on, &layout_on, &state, &palette, 1.0, &mut frame_on);
+
+        // El toggle mide 36x20 (y=10 es la línea media).
+        // En `off`, la perilla blanca está a la izquierda (~x=10) y a la derecha (~x=26) se ve la pista apagada.
+        // En `on`, la perilla blanca está a la derecha (~x=26) y a la izquierda (~x=10) se ve la pista accent.
+        let left_off = pixel_at(&frame_off, 10, 10);
+        let right_off = pixel_at(&frame_off, 26, 10);
+        let left_on = pixel_at(&frame_on, 10, 10);
+        let right_on = pixel_at(&frame_on, 26, 10);
+
+        // La perilla (blanca, r=255, g=255, b=255) está en x=10 cuando está apagado y en x=26 cuando está encendido.
+        assert_eq!(left_off, [255, 255, 255, 255], "knob a la izquierda en off");
+        assert_eq!(right_on, [255, 255, 255, 255], "knob a la derecha en on");
+        assert_ne!(left_off, right_off);
+        assert_ne!(left_on, right_on);
+
+        // El color de pista descubierto difiere entre apagado (control_bg) y encendido (accent #0A84FF).
+        assert_ne!(
+            right_off, left_on,
+            "el color de la pista debe cambiar entre off y on"
+        );
+        assert!(
+            left_on[2] > left_on[0],
+            "en on la pista expuesta a la izquierda tiene componente azul dominante (accent)"
+        );
+    }
+
+    #[test]
+    fn button_colors_differ_across_normal_hover_pressed_and_disabled_states() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Graphite);
+
+        for variant in [
+            ButtonVariant::Primary,
+            ButtonVariant::Secondary,
+            ButtonVariant::Ghost,
+        ] {
+            let tree_enabled =
+                Node::button(WidgetId::new(1), None, None, variant, true).with_fixed_size(80, 30);
+            let layout_enabled =
+                compute_layout(&tree_enabled, Size::new(80, 30), 1.0, &mut measurer)
+                    .expect("layout enabled");
+
+            let tree_disabled =
+                Node::button(WidgetId::new(1), None, None, variant, false).with_fixed_size(80, 30);
+            let layout_disabled =
+                compute_layout(&tree_disabled, Size::new(80, 30), 1.0, &mut measurer)
+                    .expect("layout disabled");
+
+            // 1. Estado normal
+            let state_normal = UiState::new();
+            let mut f_normal =
+                atoll_render::Frame::new(atoll_render::Size::new(80, 30)).expect("f_normal");
+            super::paint_tree(
+                &tree_enabled,
+                &layout_enabled,
+                &state_normal,
+                &palette,
+                1.0,
+                &mut f_normal,
+            );
+
+            // 2. Estado hover
+            let mut state_hover = UiState::new();
+            let _ = state_hover.handle(
+                &tree_enabled,
+                &layout_enabled,
+                PointerInput::move_to(40, 15),
+            );
+            let mut f_hover =
+                atoll_render::Frame::new(atoll_render::Size::new(80, 30)).expect("f_hover");
+            super::paint_tree(
+                &tree_enabled,
+                &layout_enabled,
+                &state_hover,
+                &palette,
+                1.0,
+                &mut f_hover,
+            );
+
+            // 3. Estado presionado
+            let mut state_pressed = UiState::new();
+            let _ = state_pressed.handle(
+                &tree_enabled,
+                &layout_enabled,
+                PointerInput::left_down(40, 15),
+            );
+            let mut f_pressed =
+                atoll_render::Frame::new(atoll_render::Size::new(80, 30)).expect("f_pressed");
+            super::paint_tree(
+                &tree_enabled,
+                &layout_enabled,
+                &state_pressed,
+                &palette,
+                1.0,
+                &mut f_pressed,
+            );
+
+            // 4. Estado deshabilitado
+            let mut f_disabled =
+                atoll_render::Frame::new(atoll_render::Size::new(80, 30)).expect("f_disabled");
+            super::paint_tree(
+                &tree_disabled,
+                &layout_disabled,
+                &state_normal,
+                &palette,
+                1.0,
+                &mut f_disabled,
+            );
+
+            let px_normal = pixel_at(&f_normal, 40, 15);
+            let px_hover = pixel_at(&f_hover, 40, 15);
+            let px_pressed = pixel_at(&f_pressed, 40, 15);
+            let px_disabled = pixel_at(&f_disabled, 40, 15);
+
+            assert_ne!(
+                px_normal, px_hover,
+                "{variant:?}: normal y hover deben tener distinto color de fondo"
+            );
+            assert_ne!(
+                px_hover, px_pressed,
+                "{variant:?}: hover y pressed deben tener distinto color de fondo"
+            );
+            assert_ne!(
+                px_normal, px_pressed,
+                "{variant:?}: normal y pressed deben tener distinto color de fondo"
+            );
+            if variant != ButtonVariant::Ghost {
+                assert_ne!(
+                    px_normal, px_disabled,
+                    "{variant:?}: normal y disabled deben tener distinto color de fondo"
+                );
+                assert_ne!(
+                    px_hover, px_disabled,
+                    "{variant:?}: hover y disabled deben tener distinto color de fondo"
+                );
+                assert_ne!(
+                    px_pressed, px_disabled,
+                    "{variant:?}: pressed y disabled deben tener distinto color de fondo"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slider_and_progress_bar_fill_proportionally_at_0_50_and_100_percent() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Black);
+        let state = UiState::new();
+
+        // Probamos 0%, 50% (500 permille) y 100% (1000 permille), además de 5% (50 permille) y 10% (100 permille).
+        let count_accent_columns = |frame: &atoll_render::Frame, y: u32| -> u32 {
+            let w = frame.size().width;
+            let mut cols = 0;
+            for x in 0..w {
+                let [r, g, b, _] = pixel_at(frame, x, y);
+                // El color de acento (#0A84FF) o la perilla blanca tienen componente azul alta (> 180),
+                // mientras que el fondo de pista (control_bg sobre negro) es gris oscuro (~36).
+                if b > 180 && (b > r || r > 200) {
+                    let _ = g;
+                    cols += 1;
+                }
+            }
+            cols
+        };
+
+        let mut prev_prog_cols = 0;
+        for (idx, permille) in [0u16, 50, 100, 500, 1000].into_iter().enumerate() {
+            let tree =
+                Node::progress(Permille::new(permille), Tone::Accent).with_fixed_size(200, 8);
+            let layout =
+                compute_layout(&tree, Size::new(200, 8), 1.0, &mut measurer).expect("layout");
+            let mut frame =
+                atoll_render::Frame::new(atoll_render::Size::new(200, 8)).expect("frame");
+            super::paint_tree(&tree, &layout, &state, &palette, 1.0, &mut frame);
+
+            let cols = count_accent_columns(&frame, 4);
+            if permille == 0 {
+                assert_eq!(cols, 0, "progress en 0 permille no debe tener relleno");
+            } else {
+                assert!(
+                    cols > prev_prog_cols,
+                    "progress en {permille} permille ({cols} px) debe superar al paso anterior ({prev_prog_cols} px)"
+                );
+            }
+            if permille == 500 {
+                assert!(
+                    (95..=105).contains(&cols),
+                    "progress al 50% en ancho 200 debe llenar ~100 px (obtenido {cols})"
+                );
+            }
+            if permille == 1000 {
+                assert!(
+                    cols >= 196,
+                    "progress al 100% en ancho 200 debe llenar toda la barra (obtenido {cols})"
+                );
+            }
+            let _ = idx;
+            prev_prog_cols = cols;
+        }
+
+        // Slider en 0%, 50% (500 permille) y 100% (1000 permille) en ancho 200x20.
+        let mut prev_slider_cols = 0;
+        for permille in [0u16, 50, 100, 500, 1000] {
+            let tree = Node::slider(WidgetId::new(1), Permille::new(permille), true)
+                .with_fixed_size(200, 20);
+            let layout =
+                compute_layout(&tree, Size::new(200, 20), 1.0, &mut measurer).expect("layout");
+            let mut frame =
+                atoll_render::Frame::new(atoll_render::Size::new(200, 20)).expect("frame");
+            super::paint_tree(&tree, &layout, &state, &palette, 1.0, &mut frame);
+
+            let cols = count_accent_columns(&frame, 10);
+            assert!(
+                cols > prev_slider_cols,
+                "slider en {permille} permille ({cols} px) debe ocupar más hacia la derecha que el valor anterior ({prev_slider_cols} px)"
+            );
+            prev_slider_cols = cols;
+        }
+    }
+
+    #[test]
+    fn all_11_icons_and_unknown_icon_draw_inside_their_rect_and_zero_pixels_outside() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Black);
+        let state = UiState::new();
+
+        let mut icons_to_test: Vec<IconId> = IconId::ALL.to_vec();
+        icons_to_test.push(IconId::Unknown(999));
+
+        for icon in icons_to_test {
+            let tree = Node::row(
+                0,
+                MainAlign::Start,
+                CrossAlign::Start,
+                vec![Node::icon(icon, 24, Tone::Primary).with_id(WidgetId::new(1))],
+            )
+            .with_padding(Edges::all(8))
+            .with_fixed_size(40, 40);
+
+            let layout =
+                compute_layout(&tree, Size::new(40, 40), 1.0, &mut measurer).expect("layout");
+            let icon_rect = layout.find_by_id(WidgetId::new(1)).expect("icon").rect;
+            assert_eq!(icon_rect, Rect::new(8, 8, 24, 24));
+
+            let mut frame =
+                atoll_render::Frame::new(atoll_render::Size::new(40, 40)).expect("frame");
+            super::paint_tree(&tree, &layout, &state, &palette, 1.0, &mut frame);
+
+            let inside = count_non_zero_in_rect(&frame, icon_rect);
+            let outside = count_non_zero_outside_rect(&frame, icon_rect);
+            assert!(
+                inside > 0,
+                "el ícono {icon:?} debe pintar al menos un píxel dentro de su rectángulo"
+            );
+            assert_eq!(
+                outside, 0,
+                "el ícono {icon:?} no puede pintar ningún píxel fuera de su rectángulo"
+            );
+            assert_valid_premultiplied(&frame);
+        }
+    }
+
+    #[test]
+    fn clipping_strictly_prevents_any_painting_outside_parent_content_rect() {
+        let mut tr = atoll_render::TextRenderer::new().expect("fuente");
+        let palette = default_palette_for(atoll_config::Theme::Graphite);
+        let state = UiState::new();
+
+        // Contenedor de 60x30 con padding de 10 px -> content_rect = (10, 10, 40, 10).
+        // Adentro ponemos un Label largo y un botón grande que intentarían desbordar.
+        let tree = Node::row(
+            4,
+            MainAlign::Start,
+            CrossAlign::Center,
+            vec![
+                Node::label("Texto muy largo que se recorta", 18, Tone::Primary),
+                Node::button(
+                    WidgetId::new(1),
+                    Some("Botón grande".to_owned()),
+                    Some(IconId::Settings),
+                    ButtonVariant::Primary,
+                    true,
+                )
+                .with_fixed_size(120, 40),
+            ],
+        )
+        .with_padding(Edges::all(10))
+        .with_fixed_size(60, 30);
+
+        let layout = compute_layout(&tree, Size::new(100, 60), 1.0, &mut tr).expect("layout");
+        let content_rect = layout.nodes[0].content_rect;
+        assert_eq!(content_rect, Rect::new(10, 10, 40, 10));
+
+        let mut frame = atoll_render::Frame::new(atoll_render::Size::new(100, 60)).expect("frame");
+        super::paint_tree_with_text(&tree, &layout, &state, &palette, 1.0, &mut frame, &mut tr);
+
+        let inside = count_non_zero_in_rect(&frame, content_rect);
+        let outside = count_non_zero_outside_rect(&frame, content_rect);
+        assert!(inside > 0, "debe pintarse contenido dentro de content_rect");
+        assert_eq!(
+            outside, 0,
+            "ningún hijo puede pintar un solo píxel fuera del content_rect del padre"
+        );
+    }
+
+    #[test]
+    fn scale_1_0_vs_1_5_scales_painted_geometry_proportionally() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Black);
+        let state = UiState::new();
+
+        let tree = Node::row(
+            8,
+            MainAlign::Start,
+            CrossAlign::Center,
+            vec![
+                Node::icon(IconId::Play, 20, Tone::Accent),
+                Node::toggle(WidgetId::new(1), true, true),
+            ],
+        );
+
+        let layout_1 =
+            compute_layout(&tree, Size::new(200, 60), 1.0, &mut measurer).expect("layout 1.0");
+        let mut frame_1 =
+            atoll_render::Frame::new(atoll_render::Size::new(200, 60)).expect("frame 1.0");
+        super::paint_tree(&tree, &layout_1, &state, &palette, 1.0, &mut frame_1);
+
+        let layout_15 =
+            compute_layout(&tree, Size::new(200, 60), 1.5, &mut measurer).expect("layout 1.5");
+        let mut frame_15 =
+            atoll_render::Frame::new(atoll_render::Size::new(200, 60)).expect("frame 1.5");
+        super::paint_tree(&tree, &layout_15, &state, &palette, 1.5, &mut frame_15);
+
+        let painted_1 = count_non_zero_in_rect(&frame_1, Rect::new(0, 0, 200, 60));
+        let painted_15 = count_non_zero_in_rect(&frame_15, Rect::new(0, 0, 200, 60));
+        assert!(
+            painted_15 > painted_1,
+            "a escala 1,5x deben pintarse más píxeles ({painted_15}) que a 1,0x ({painted_1})"
+        );
+    }
+
+    #[test]
+    fn zero_size_or_out_of_frame_rectangles_never_panic() {
+        let mut measurer = FakeMeasurer;
+        let palette = default_palette_for(atoll_config::Theme::Graphite);
+        let state = UiState::new();
+
+        let tree = Node::column(
+            4,
+            MainAlign::Start,
+            CrossAlign::Stretch,
+            vec![
+                Node::label("Hola", 16, Tone::Primary),
+                Node::icon(IconId::Settings, 20, Tone::Accent),
+                Node::button(
+                    WidgetId::new(1),
+                    Some("Ok".to_owned()),
+                    Some(IconId::Check),
+                    ButtonVariant::Primary,
+                    true,
+                ),
+                Node::toggle(WidgetId::new(2), true, true),
+                Node::slider(WidgetId::new(3), Permille::new(500), true),
+                Node::progress(Permille::new(500), Tone::Accent),
+                Node::separator(2),
+            ],
+        );
+
+        // 1. Superficie 0x0 sobre un Frame pequeño.
+        let layout_zero =
+            compute_layout(&tree, Size::ZERO, 1.0, &mut measurer).expect("layout 0x0");
+        let mut frame_small =
+            atoll_render::Frame::new(atoll_render::Size::new(10, 10)).expect("frame 10x10");
+        super::paint_tree(&tree, &layout_zero, &state, &palette, 1.0, &mut frame_small);
+        assert_eq!(
+            count_non_zero_in_rect(&frame_small, Rect::new(0, 0, 10, 10)),
+            0
+        );
+
+        // 2. Layout grande (400x300) pintado sobre un Frame mucho más chico (12x12) y con coordenadas fuera del Frame.
+        let mut layout_big =
+            compute_layout(&tree, Size::new(400, 300), 1.0, &mut measurer).expect("layout 400x300");
+        super::paint_tree(&tree, &layout_big, &state, &palette, 1.0, &mut frame_small);
+        assert_valid_premultiplied(&frame_small);
+
+        // 3. Nodos desplazados a coordenadas negativas o completamente fuera del Frame.
+        for lnode in &mut layout_big.nodes {
+            lnode.rect.x = -500;
+            lnode.rect.y = -500;
+            lnode.content_rect.x = -500;
+            lnode.content_rect.y = -500;
+        }
+        super::paint_tree(&tree, &layout_big, &state, &palette, 1.0, &mut frame_small);
+        assert_valid_premultiplied(&frame_small);
+    }
+
+    #[test]
+    fn painting_is_strictly_deterministic_byte_for_byte() {
+        let mut tr_a = atoll_render::TextRenderer::new().expect("tr_a");
+        let mut tr_b = atoll_render::TextRenderer::new().expect("tr_b");
+        let palette = default_palette_for(atoll_config::Theme::Graphite);
+
+        let tree = Node::column(
+            6,
+            MainAlign::Start,
+            CrossAlign::Stretch,
+            vec![
+                Node::row(
+                    8,
+                    MainAlign::SpaceBetween,
+                    CrossAlign::Center,
+                    vec![
+                        Node::label("Atoll UI", 16, Tone::Primary),
+                        Node::icon(IconId::Volume, 18, Tone::Accent),
+                        Node::toggle(WidgetId::new(1), true, true),
+                    ],
+                ),
+                Node::separator(1),
+                Node::row(
+                    6,
+                    MainAlign::Start,
+                    CrossAlign::Center,
+                    vec![
+                        Node::button(
+                            WidgetId::new(2),
+                            Some("Reproducir".to_owned()),
+                            Some(IconId::Play),
+                            ButtonVariant::Primary,
+                            true,
+                        ),
+                        Node::icon_button(
+                            WidgetId::new(3),
+                            IconId::NextTrack,
+                            ButtonVariant::Secondary,
+                            true,
+                        ),
+                    ],
+                ),
+                Node::slider(WidgetId::new(4), Permille::new(625), true),
+                Node::progress(Permille::new(400), Tone::Accent),
+            ],
+        )
+        .with_padding(Edges::all(8))
+        .with_background(Tone::Custom(palette.background));
+
+        let layout_a =
+            compute_layout(&tree, Size::new(260, 140), 1.25, &mut tr_a).expect("layout_a");
+        let layout_b =
+            compute_layout(&tree, Size::new(260, 140), 1.25, &mut tr_b).expect("layout_b");
+        assert_eq!(layout_a, layout_b);
+
+        let mut state = UiState::new();
+        let _ = state.handle(&tree, &layout_a, PointerInput::move_to(40, 60));
+
+        let mut frame_a =
+            atoll_render::Frame::new(atoll_render::Size::new(260, 140)).expect("frame_a");
+        let mut frame_b =
+            atoll_render::Frame::new(atoll_render::Size::new(260, 140)).expect("frame_b");
+
+        super::paint_tree_with_text(
+            &tree,
+            &layout_a,
+            &state,
+            &palette,
+            1.25,
+            &mut frame_a,
+            &mut tr_a,
+        );
+        super::paint_tree_with_text(
+            &tree,
+            &layout_b,
+            &state,
+            &palette,
+            1.25,
+            &mut frame_b,
+            &mut tr_b,
+        );
+
+        assert_eq!(
+            frame_a.rgba_premultiplied(),
+            frame_b.rgba_premultiplied(),
+            "dos pintados idénticos deben producir exactamente los mismos bytes"
+        );
+        assert_valid_premultiplied(&frame_a);
     }
 }

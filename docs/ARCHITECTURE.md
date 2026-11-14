@@ -12,9 +12,9 @@
 |---|---|---|
 | `atoll-core` | `core/atoll-core` | Binario `atoll`: carga/recarga de `config.ini`, contenido de la isla (`IslandPainter`), estado y host de plugins |
 | `atoll-platform` | `core/atoll-platform` | Código específico de SO (`cfg(target_os)`), traits `Backend` y `Painter`, y módulos portables `animation`, `clock` y `dpi` |
-| `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` (con radio independiente por esquina `CornerRadii`) y texto con `fontdue` (fuente embebida y caché de glifos) |
+| `atoll-render` | `core/atoll-render` | Render por software con `tiny-skia` (con radio independiente por esquina `CornerRadii`, primitivas recortadas `fill_rounded_rect` y `stroke_path` sobre comandos planos `PathCmd`) y texto con `fontdue` (`TextRenderer::draw` y `draw_clipped` con fuente embebida y caché de glifos) |
 | `atoll-config` | `packages/atoll-config` | Configuración, temas y comportamiento de Atoll: parser y serializador propios sin dependencias externas |
-| `atoll-ui` | `packages/atoll-ui` | Mini toolkit declarativo de widgets: árbol de datos (`Node`, `WidgetKind`), validación con límites, motor de layout puro (`compute_layout`), hit-testing (`hit_test`) y estado interactivo (`UiState`), sin dependencias externas |
+| `atoll-ui` | `packages/atoll-ui` | Mini toolkit declarativo de widgets: árbol de datos (`Node`, `WidgetKind`), validación con límites, motor de layout puro (`compute_layout`), hit-testing (`hit_test`), estado interactivo (`UiState`), tema (`ThemePalette`), íconos vectoriales (`IconId::commands`) y pintado (`paint_tree`), dependiendo solo de los crates internos `atoll-config` y `atoll-render` (0 dependencias externas) |
 | `atoll-ipc` | `packages/atoll-ipc` | Protocolo IPC local Core ↔ plugins |
 | `atoll-plugin-sdk` | `packages/atoll-plugin-sdk` | SDK para autores de plugins |
 

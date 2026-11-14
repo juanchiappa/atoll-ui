@@ -43,7 +43,7 @@ Referencia: Hecho / En revisión / Pendiente.
 | 12b | Autoocultar (v0.2) | Pendiente |
 | 14a | `atoll-ui`: árbol de widgets, validación y motor de layout puro | Hecho |
 | 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Hecho |
-| 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `UiTheme` | Pendiente |
+| 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `ThemePalette` | Hecho |
 | 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Pendiente |
 | 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
 | 16 | Idiomas es/en | Pendiente |
@@ -147,16 +147,25 @@ Referencia: Hecho / En revisión / Pendiente.
   `Button`/`IconButton`/`Toggle` al salir y volver a entrar, arrastre continuo en `Slider` acotado a `0..=1000` permille
   sin división por cero, ignorado de botones no izquierdos y rueda, y cálculo exacto de `needs_redraw`.
 
+### 14c. `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `ThemePalette` (hecho)
+
+- `atoll-ui` depende únicamente de los crates internos `atoll-config` y `atoll-render` (0 dependencias externas;
+  `atoll-render` sigue siendo el único crate que conoce `tiny-skia`).
+- `atoll-render` expone `ClipRect`, `PathCmd` (`MoveTo`, `LineTo`, `QuadTo`, `CubicTo`, `Close` en grilla entera `24x24`),
+  `fill_rounded_rect`, `stroke_path` y `TextRenderer::draw_clipped` con recorte estricto y aritmética saturante.
+- Catálogo de los 11 `IconId` como datos planos (`&'static [PathCmd]`) más marcador neutro (`IconId::Unknown`) sin error
+  ni pánico; `ThemePalette::from_appearance(&AppearanceSection)` con derivación entera de estados y acento por preset;
+  `TextMeasurer` implementado para `atoll_render::TextRenderer`; `paint_tree` / `paint_tree_with_text` y galería visual
+  en `packages/atoll-ui/examples/gallery.rs`.
+
 ## Ítems pendientes
 
 ### 12b. Autoocultar (v0.2)
 
 - Opción de autoocultar la isla y mostrarla al acercar el puntero al borde superior (movido de la v0.1 a la v0.2).
 
-### 14c–14d. `atoll-ui`: pintado e integración con la isla
+### 14d. `atoll-ui`: integración con la isla
 
-- **14c:** Pintado con `atoll-render`, íconos vectoriales como comandos de trazo planos (`atoll-ui` no depende de
-  `tiny-skia`) y derivación de `UiTheme` desde `atoll-config`.
 - **14d:** Eventos de mouse en Windows (`WM_LBUTTONDOWN`, `WM_LBUTTONUP`) y migración del reloj de la isla a un
   árbol de widgets de `atoll-ui`.
 
