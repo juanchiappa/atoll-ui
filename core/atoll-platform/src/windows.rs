@@ -53,7 +53,7 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForWindow, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
@@ -61,15 +61,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetCoalescableTimer, SetProcessDPIAware, SetTimer, ShowWindow, TranslateMessage,
     UnregisterClassW, UpdateLayeredWindow, IDC_ARROW, MSG, PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND, SM_CXSCREEN, SW_SHOWNOACTIVATE, TIMERV_NO_COALESCING, ULW_ALPHA, WM_APP,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP,
-    WM_TIMECHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMECHANGE, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::animation::{Animator, HoverAction};
 use crate::clock::{local_time, LocalTime};
 use crate::dpi::{scale_for_dpi, scale_px, scale_size};
-use crate::{Backend, IslandConfig, Painter, PlatformError};
+use crate::{
+    Backend, IslandConfig, MouseButton, Painter, PainterAction, PlatformError, PointerEvent,
+};
 
 /// Nombre de la clase de ventana registrada en Win32.
 const CLASS_NAME: &str = "AtollIsland";
@@ -156,6 +158,8 @@ thread_local! {
     static PAINTER: Cell<Option<Box<dyn Painter>>> = const { Cell::new(None) };
     /// Hora con la que se dibujó el último cuadro: sirve para no redibujar si el texto no cambió.
     static LAST_DRAWN: Cell<Option<LocalTime>> = const { Cell::new(None) };
+    /// Indica si `ReleaseCapture` fue invocado por nosotros al soltar el botón izquierdo.
+    static RELEASING_CAPTURE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Backend nativo para Windows.
@@ -177,6 +181,7 @@ impl Backend for WindowsBackend {
         ANIMATOR.set(None);
         LAST_DRAWN.set(None);
         CONFIG.set(None);
+        RELEASING_CAPTURE.set(false);
         result
     }
 }
@@ -204,6 +209,19 @@ fn os_error(call: &'static str) -> PlatformError {
 /// Convierte píxeles sin signo a `i32` de Win32, saturando si no entran.
 fn to_i32(value: u32) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// Extrae las coordenadas `(x, y)` con signo (en píxeles físicos relativos a la ventana)
+/// empaquetadas en `lparam` por los mensajes de mouse de Win32 (`GET_X_LPARAM` / `GET_Y_LPARAM`).
+const fn mouse_coords(lparam: LPARAM) -> (i32, i32) {
+    let x = (lparam & 0xFFFF) as i16 as i32;
+    let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+    (x, y)
+}
+
+/// Comprueba si el punto `(x, y)` cae dentro de `0..size.width` y `0..size.height`.
+fn point_in_size(x: i32, y: i32, size: Size) -> bool {
+    x >= 0 && y >= 0 && x < to_i32(size.width) && y < to_i32(size.height)
 }
 
 /// Calcula la esquina superior izquierda para una isla de ancho `width`,
@@ -595,34 +613,98 @@ unsafe fn present_frame(
     result
 }
 
-/// El mouse entró o se movió dentro de la isla.
+/// Pide a Windows el aviso `WM_MOUSELEAVE` cuando el puntero salga de `hwnd`.
+///
+/// # Safety
+///
+/// `hwnd` debe ser una ventana válida propiedad de este hilo.
+unsafe fn request_mouse_leave(hwnd: HWND) {
+    let mut request = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    // SAFETY: `request` está completo y `hwnd` es válido.
+    unsafe { TrackMouseEvent(&mut request) };
+}
+
+/// Entrega un evento de puntero al `Painter`, redibuja una sola vez si cambió el estado
+/// visual y ejecuta las acciones devueltas (`OpenConfig`, `Quit`).
 ///
 /// # Safety
 ///
 /// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
-unsafe fn on_mouse_move(hwnd: HWND) {
+unsafe fn dispatch_pointer_event(hwnd: HWND, event: PointerEvent) {
+    let expanded = ANIMATOR.get().is_some_and(|a| a.is_fully_expanded());
+    let outcome = if let Some(mut painter) = PAINTER.take() {
+        painter.set_expanded(expanded);
+        let out = painter.on_pointer(event);
+        PAINTER.set(Some(painter));
+        out
+    } else {
+        return;
+    };
+
+    if outcome.actions.contains(&PainterAction::Quit) {
+        // SAFETY: `hwnd` es válido y pertenece a este hilo.
+        unsafe { DestroyWindow(hwnd) };
+        return;
+    }
+
+    if outcome.needs_redraw {
+        if let Some(animator) = ANIMATOR.get() {
+            draw_step(hwnd, animator.size());
+        }
+    }
+
+    for action in outcome.actions {
+        match action {
+            PainterAction::OpenConfig => {
+                if let Some(mut painter) = PAINTER.take() {
+                    painter.open_config();
+                    PAINTER.set(Some(painter));
+                }
+            }
+            PainterAction::Quit => {
+                // SAFETY: `hwnd` es válido y pertenece a este hilo.
+                unsafe { DestroyWindow(hwnd) };
+                return;
+            }
+        }
+    }
+}
+
+/// El mouse entró o se movió dentro de la isla (o con captura activa).
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let Some(mut animator) = ANIMATOR.get() else {
         return;
     };
     let was_inside = animator.is_pointer_inside();
-    let action = animator.on_mouse_enter(Instant::now());
+    let in_bounds = point_in_size(x, y, animator.size());
+    let action = if in_bounds || !was_inside {
+        animator.on_mouse_enter(Instant::now())
+    } else {
+        HoverAction::None
+    };
     ANIMATOR.set(Some(animator));
 
-    if !was_inside {
+    if !was_inside && in_bounds {
         // Pide el aviso `WM_MOUSELEAVE` para saber cuándo sale el mouse, incluso si
         // estamos esperando que venza el timer del retardo (`HOVER_DELAY_TIMER`).
-        let mut request = TRACKMOUSEEVENT {
-            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-            dwFlags: TME_LEAVE,
-            hwndTrack: hwnd,
-            dwHoverTime: 0,
-        };
-        // SAFETY: `request` está completo y `hwnd` es válido.
-        unsafe { TrackMouseEvent(&mut request) };
+        // SAFETY: `hwnd` es válido.
+        unsafe { request_mouse_leave(hwnd) };
     }
 
     // SAFETY: `hwnd` es válido.
-    unsafe { execute_hover_action(hwnd, action) };
+    unsafe {
+        execute_hover_action(hwnd, action);
+        dispatch_pointer_event(hwnd, PointerEvent::Move { x, y });
+    }
 }
 
 /// El mouse salió de la isla: cancela el retardo pendiente o contrae sin retardo.
@@ -637,8 +719,88 @@ unsafe fn on_mouse_leave(hwnd: HWND) {
     let action = animator.on_mouse_leave(Instant::now());
     ANIMATOR.set(Some(animator));
 
+    if let Some(mut painter) = PAINTER.take() {
+        painter.set_expanded(false);
+        let _ = painter.on_pointer(PointerEvent::Leave);
+        PAINTER.set(Some(painter));
+    }
+
     // SAFETY: `hwnd` es válido.
     unsafe { execute_hover_action(hwnd, action) };
+}
+
+/// Se presionó el botón izquierdo del mouse en `(x, y)`.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_left_button_down(hwnd: HWND, x: i32, y: i32) {
+    // SAFETY: `hwnd` es válido; captura el mouse para recibir `WM_LBUTTONUP` aunque salga.
+    unsafe {
+        SetCapture(hwnd);
+        dispatch_pointer_event(
+            hwnd,
+            PointerEvent::Down {
+                x,
+                y,
+                button: MouseButton::Left,
+            },
+        );
+    }
+}
+
+/// Se soltó el botón izquierdo del mouse en `(x, y)`.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_left_button_up(hwnd: HWND, x: i32, y: i32) {
+    // SAFETY: `hwnd` es válido.
+    unsafe {
+        dispatch_pointer_event(
+            hwnd,
+            PointerEvent::Up {
+                x,
+                y,
+                button: MouseButton::Left,
+            },
+        );
+    }
+
+    RELEASING_CAPTURE.set(true);
+    // SAFETY: libera la captura del mouse de este hilo.
+    unsafe { ReleaseCapture() };
+    RELEASING_CAPTURE.set(false);
+
+    if WINDOW_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    if let Some(animator) = ANIMATOR.get() {
+        if point_in_size(x, y, animator.size()) {
+            // Re-arma `TME_LEAVE` por si la captura consumió el seguimiento previo.
+            // SAFETY: `hwnd` es válido.
+            unsafe { request_mouse_leave(hwnd) };
+        } else {
+            // Si soltó fuera de la isla mientras estaba capturado, ahora sale de la isla.
+            // SAFETY: `hwnd` es válido.
+            unsafe { on_mouse_leave(hwnd) };
+        }
+    }
+}
+
+/// La ventana perdió la captura del mouse.
+///
+/// # Safety
+///
+/// `hwnd` debe ser la ventana de la isla, dentro de su procedimiento de ventana.
+unsafe fn on_capture_changed(hwnd: HWND) {
+    if RELEASING_CAPTURE.get() || WINDOW_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+    // Si otro proceso o el sistema nos quitó la captura a mitad de un clic, limpiamos el estado.
+    // SAFETY: `hwnd` es válido.
+    unsafe { dispatch_pointer_event(hwnd, PointerEvent::Leave) };
 }
 
 /// Venció el timer de un solo disparo del retardo de hover (`HOVER_DELAY_TIMER`).
@@ -686,6 +848,12 @@ unsafe fn execute_hover_action(hwnd: HWND, action: HoverAction) {
                 // SAFETY: `hwnd` es válido.
                 unsafe { on_timer(hwnd) };
             } else {
+                if action == HoverAction::StartCollapse {
+                    // Al empezar a contraer, oculta de inmediato el árbol de widgets.
+                    if let Some(animator) = ANIMATOR.get() {
+                        draw_step(hwnd, animator.size());
+                    }
+                }
                 // SAFETY: `hwnd` es válido; el timer se apaga solo al terminar la animación.
                 unsafe { SetTimer(hwnd, ANIMATION_TIMER, FRAME_INTERVAL_MS, None) };
             }
@@ -718,7 +886,9 @@ unsafe fn on_timer(hwnd: HWND) {
 /// Le pide el cuadro a quien dibuja, para el tamaño dado y la hora actual.
 fn paint(size: Size) -> Option<(Frame, LocalTime)> {
     let time = local_time().ok()?;
+    let expanded = ANIMATOR.get().is_some_and(|a| a.is_fully_expanded());
     let mut painter = PAINTER.take()?;
+    painter.set_expanded(expanded);
     let frame = painter.paint(size, SCALE.get(), time);
     PAINTER.set(Some(painter));
     frame.map(|frame| (frame, time))
@@ -876,13 +1046,31 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_MOUSEMOVE => {
+            let (x, y) = mouse_coords(lparam);
             // SAFETY: Windows invoca este procedimiento con un `hwnd` válido.
-            unsafe { on_mouse_move(hwnd) };
+            unsafe { on_mouse_move(hwnd, x, y) };
             0
         }
         WM_MOUSELEAVE => {
             // SAFETY: ídem.
             unsafe { on_mouse_leave(hwnd) };
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = mouse_coords(lparam);
+            // SAFETY: ídem.
+            unsafe { on_left_button_down(hwnd, x, y) };
+            0
+        }
+        WM_LBUTTONUP => {
+            let (x, y) = mouse_coords(lparam);
+            // SAFETY: ídem.
+            unsafe { on_left_button_up(hwnd, x, y) };
+            0
+        }
+        WM_CAPTURECHANGED => {
+            // SAFETY: ídem.
+            unsafe { on_capture_changed(hwnd) };
             0
         }
         WM_TIMER if wparam == ANIMATION_TIMER => {
@@ -964,7 +1152,9 @@ unsafe extern "system" fn window_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::mentions_config_file;
+    use super::{mentions_config_file, mouse_coords, point_in_size};
+    use atoll_render::Size;
+    use windows_sys::Win32::Foundation::LPARAM;
 
     /// Arma una entrada `FILE_NOTIFY_INFORMATION` en bytes para probar el filtro.
     fn encode_entry(next_offset: u32, action: u32, name: &str) -> Vec<u8> {
@@ -1004,5 +1194,20 @@ mod tests {
         let second = encode_entry(0, 5, "config.ini");
         first.extend_from_slice(&second);
         assert!(mentions_config_file(&first));
+    }
+
+    #[test]
+    fn mouse_coords_sign_extends_negative_coordinates_and_checks_bounds() {
+        let pos: LPARAM = (32_isize << 16) | 410_isize;
+        assert_eq!(mouse_coords(pos), (410, 32));
+        assert!(point_in_size(410, 32, Size::new(480, 64)));
+
+        // Coordenadas negativas cuando el puntero sale hacia arriba/izquierda con captura activa.
+        let neg_x = (-15_i16 as u16) as isize;
+        let neg_y = (-8_i16 as u16) as isize;
+        let neg: LPARAM = (neg_y << 16) | neg_x;
+        assert_eq!(mouse_coords(neg), (-15, -8));
+        assert!(!point_in_size(-15, -8, Size::new(480, 64)));
+        assert!(!point_in_size(480, 64, Size::new(480, 64)));
     }
 }

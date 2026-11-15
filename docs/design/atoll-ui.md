@@ -1,6 +1,6 @@
 # Diseño de `atoll-ui` (Ítem 14 — Mini toolkit de widgets)
 
-- **Estado:** Propuesta para revisión antes de implementar código.
+- **Estado:** Implementado (14a–14d).
 - **Crate destino:** `packages/atoll-ui`
 - **Dependencias internas:** `atoll-render` y `atoll-config`.
 - **Dependencias externas:** **ninguna (0 crates externos).**
@@ -318,9 +318,9 @@ pub struct LayoutNode {
 /// Árbol posicionado resultante de aplicar layout a un `Node`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutTree {
-    pub root_size: Size,
-    pub scale: u32, // bits o milésimas para comparar igualdad
-    pub nodes: Vec<LayoutNode>,
+    pub available: Size,
+    pub scale_permille: u32,
+    pub root: LayoutNode,
 }
 
 /// Calcula las posiciones físicas de todos los nodos dentro de `available` a la escala `scale`.
@@ -332,6 +332,8 @@ pub fn compute_layout(
     measurer: &mut dyn TextMeasurer,
 ) -> LayoutTree;
 ```
+
+> **Coordenadas lógicas vs. físicas:** el árbol `Node` se expresa en píxeles lógicos (96 DPI), mientras que `compute_layout`, `hit_test`, `UiState::handle` y `paint_tree_with_text` trabajan íntegramente en **píxeles físicos**, pasando `available = scale_size(hover_size, scale)` (exactamente la misma función que define el tamaño físico real de la ventana expandida). Al cambiar el DPI o recargar la configuración se recalculan `available` y el layout y se llama a `UiState::sync`.
 
 ### Reglas del algoritmo de layout
 1. **Tamaño intrínseco (`Length::Auto`):**
@@ -447,6 +449,7 @@ impl UiState {
 - **Captura en `Button`, `IconButton` y `Toggle`:** `Down` izquierdo sobre un widget habilitado guarda `captured_press = Some(id)` y el widget se ve presionado (`pressed() == Some(id)`). Si el puntero sale mientras sigue presionado, el widget deja de verse presionado (`pressed() == None`, `needs_redraw = true`), pero el gesto sigue capturado: si vuelve a entrar sin soltar, vuelve a verse presionado; si se suelta afuera, no se emite evento. Solo al soltar adentro del mismo widget se emite `UiEvent::Clicked(id)` o `UiEvent::Toggled { id, checked: !checked }`.
 - **Arrastre (`Slider`):** `Down` izquierdo sobre un `Slider` habilitado inicia `dragging_slider = Some(id)` y emite el valor de esa posición en `Permille` (`0..=1000`). Mientras se arrastra (`Move`), sigue emitiendo aunque el puntero salga del widget (acotado a `0` y `1000` permille, con enteros saturantes y sin división por cero si el ancho de la pista es `0`). Al soltar (`Up` izquierdo), termina el arrastre.
 - **Botones e entradas ignoradas:** solo `PointerButton::Left` interactúa; los demás botones y `PointerInput::Wheel` se ignoran sin cambiar el estado.
+- **Frontera con `atoll-platform` y coordenadas:** `atoll-platform` no depende de `atoll-ui`. Expone `MouseButton`, `PointerEvent`, `PainterAction` y `PointerOutcome` en coordenadas físicas. `atoll-core` traduce `PointerEvent` directamente a `PointerInput` (sin dividir por `scale`, ya que `LayoutTree`, `hit_test` y `UiState::handle` operan en píxeles físicos) y convierte `UiEvent` en `PainterAction`.
 
 ---
 
@@ -568,12 +571,14 @@ Para mantener PRs chicos, revisables y atómicos, el ítem 14 se divide en **4 P
   - Todos los píxeles del `Frame` mantienen alfa premultiplicado válido (`r, g, b <= a`).
 - **Aceptación:** tests de píxeles en verde en Linux, Windows y macOS.
 
-### PR 14d — `feat/atoll-ui-isla`: integración en `IslandPainter` con contenido real
+### PR 14d — `feat/isla-widgets`: integración en `IslandPainter` y eventos de mouse en Windows
 - **Alcance:**
-  - Reemplazar el posicionamiento manual de hora y fecha en `atoll-core::island::IslandPainter` por un árbol de `atoll-ui` (`Column` centrada con `Label` de hora y `Label` de fecha durante la expansión), conectando los eventos de mouse de la ventana cuando corresponda.
+  - En reposo y durante **toda** la animación de expansión o contracción, `IslandPainter` dibuja solo la hora centrada (sin recalcular layout en cada paso de la animación).
+  - Cuando la isla está en hover y la animación de expansión terminó (`is_fully_expanded`), dibuja un árbol de `atoll-ui` con: a la izquierda una `Column` con la hora (`Label` grande, `Tone::Primary`) y la fecha (`Label` chico, `Tone::Muted`); a la derecha una `Row` con el `IconButton` de Ajustes (`WIDGET_ID_SETTINGS`, engranaje) y el `IconButton` de Cerrar (`WIDGET_ID_CLOSE`, `X`). Al empezar a contraer vuelve de inmediato a mostrar solo la hora.
+  - Conectar en el backend de Windows (`atoll-platform`, sin depender de `atoll-ui`) `WM_MOUSEMOVE`, `WM_MOUSELEAVE`, `WM_LBUTTONDOWN` (con `SetCapture`), `WM_LBUTTONUP` (con `ReleaseCapture`) y `WM_CAPTURECHANGED` hacia `Painter::on_pointer`, ejecutando `PainterAction::OpenConfig` (`explorer.exe <config.ini>`) y `PainterAction::Quit` (`DestroyWindow`), y redibujando solo cuando `needs_redraw == true`. El clic derecho sigue cerrando la isla.
 - **Tests y verificación:**
-  - Todos los tests existentes de `IslandPainter` siguen pasando.
-  - Prueba manual en Windows y medición de RAM (`< 20 MB`) y CPU en reposo (`0,00` entre dos muestras a 30 s).
+  - Tests unitarios del árbol, layout físico en escalas `1.0`, `1.5` y `2.0`, hit-testing y clic en los centros de ambos botones, cancelación al soltar afuera, cero redibujados en movimientos sin cambio de estado, comparación de píxeles entre animación/reposo y hover completo, sincronización ante cambio de minuto/configuración/DPI, estilos `island`/`notch` y cobertura de fuente embebida.
+  - Prueba manual en Windows y medición de RAM adicional (`< 1 MB`, `< 20 MB` total) y CPU en reposo (`0,00` entre dos muestras a 30 s).
 
 ---
 
@@ -581,13 +586,13 @@ Para mantener PRs chicos, revisables y atómicos, el ítem 14 se divide en **4 P
 
 1. **Redibujados innecesarios al mover el mouse (`WM_MOUSEMOVE`):**
    - *Riesgo:* Windows envía decenas de `WM_MOUSEMOVE` por segundo mientras el cursor se mueve sobre la isla. Si cada uno redibujara el `Frame`, subiría el uso de CPU.
-   - *Mitigación:* `UiState::handle_pointer` devuelve `needs_redraw: false` si el `WidgetId` bajo el cursor no cambió (y no hay un `Slider` arrastrándose cuyo valor haya cambiado). En la isla actual (solo reloj y fecha, sin widgets interactivos aún), mover el mouse adentro produce **cero** redibujados extra tras terminar la animación.
+   - *Mitigación:* `UiState::handle` devuelve `needs_redraw: false` si el `WidgetId` bajo el cursor no cambió (y no hay un `Slider` arrastrándose cuyo valor haya cambiado). Mover el mouse sobre zonas vacías o dentro del mismo botón produce **cero** redibujados extra.
 2. **Árboles patológicos enviados por un plugin (ítem 15):**
    - *Riesgo:* un plugin con un bug podría armar un árbol de 10.000 nodos o 500 niveles de anidamiento.
-   - *Mitigación:* `compute_layout` aplica dos límites duros constantes: `MAX_TREE_DEPTH = 32` y `MAX_TREE_NODES = 1024`, truncando el resto sin entrar en pánico ni desbordar la pila.
-3. **Interpolación suave durante la animación de hover de la isla:**
-   - *Riesgo:* mientras la isla se expande de `400x40` a `480x64`, la fecha aparece con un fundido de opacidad (`alpha` proporcional al progreso).
-   - *Mitigación:* `Tone::Custom(Color)` permite que `IslandPainter` pase el color de la fecha con su alfa interpolado en cada paso de los 180 ms de animación, manteniendo la misma transición visual que hoy.
+   - *Mitigación:* `validate_tree` y `compute_layout` aplican dos límites duros constantes: `MAX_TREE_DEPTH = 32` y `MAX_TREE_NODES = 1024`, sin entrar en pánico ni desbordar la pila.
+3. **Captura del mouse (`SetCapture` / `ReleaseCapture`) y seguimiento de `WM_MOUSELEAVE` en Win32:**
+   - *Riesgo:* si el usuario presiona el botón izquierdo sobre un `IconButton`, arrastra el cursor fuera de la ventana y suelta afuera, sin `SetCapture` la ventana no recibiría `WM_LBUTTONUP` ni sabría que el puntero salió; además, en Win32 `SetCapture`/`ReleaseCapture` puede consumir una suscripción activa de `TrackMouseEvent(TME_LEAVE)` si se suelta adentro.
+   - *Mitigación:* en `WM_LBUTTONDOWN` se llama a `SetCapture(hwnd)` y se extienden con signo las coordenadas de `lparam` (`i16 as i32`). En `WM_LBUTTONUP` se llama a `ReleaseCapture()`: si se soltó fuera del rectángulo físico de la ventana, se envía `PointerEvent::Leave` y se inicia la contracción de la isla; si se soltó adentro, se re-arma `TrackMouseEvent(TME_LEAVE)` para que la futura salida del mouse dispare `WM_MOUSELEAVE`. Ante `WM_CAPTURECHANGED` también se limpia el estado interactivo.
 
 ---
 

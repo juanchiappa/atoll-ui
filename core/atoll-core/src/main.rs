@@ -1,6 +1,7 @@
 //! Punto de entrada del Core de Atoll.
 
 mod island;
+mod island_ui;
 
 use std::env;
 use std::error::Error;

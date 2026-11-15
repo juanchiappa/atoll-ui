@@ -44,7 +44,7 @@ Referencia: Hecho / En revisión / Pendiente.
 | 14a | `atoll-ui`: árbol de widgets, validación y motor de layout puro | Hecho |
 | 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Hecho |
 | 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `ThemePalette` | Hecho |
-| 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Pendiente |
+| 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Hecho |
 | 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
 | 16 | Idiomas es/en | Pendiente |
 | 17 | `atoll-settings`, menú de configuración (ejecutable aparte) | Pendiente |
@@ -158,16 +158,24 @@ Referencia: Hecho / En revisión / Pendiente.
   `TextMeasurer` implementado para `atoll_render::TextRenderer`; `paint_tree` / `paint_tree_with_text` y galería visual
   en `packages/atoll-ui/examples/gallery.rs`.
 
+### 14d. `atoll-ui`: eventos de mouse en Windows e integración en la isla (hecho)
+
+- `atoll-platform` (sin depender de `atoll-ui`) expone `MouseButton`, `PointerEvent` (`Move`, `Leave`, `Down`, `Up` en
+  coordenadas físicas), `PainterAction` (`OpenConfig`, `Quit`), `PointerOutcome`, `Animator::is_fully_expanded` y los
+  métodos `Painter::set_expanded`, `Painter::on_pointer` y `Painter::open_config`.
+- El backend de Windows rutea `WM_MOUSEMOVE`, `WM_MOUSELEAVE`, `WM_LBUTTONDOWN` (con `SetCapture`), `WM_LBUTTONUP` (con
+  `ReleaseCapture`) y `WM_CAPTURECHANGED`, redibujando una sola vez únicamente cuando `needs_redraw == true`. El clic
+  derecho (`WM_RBUTTONUP`) sigue cerrando la isla. Cero timers nuevos.
+- En reposo y durante toda la animación de expansión o contracción se dibuja solo la hora centrada; con la isla en hover y
+  la expansión terminada (`is_fully_expanded`), `atoll-core` dibuja un árbol de `atoll-ui` con la hora y la fecha a la
+  izquierda y los `IconButton` de Ajustes (que abre `%APPDATA%\Atoll\config.ini` con `explorer.exe`) y Cerrar a la derecha,
+  adaptándose al estilo (`island` / `notch`), radio de esquina, tema y DPI (`UiState::sync`).
+
 ## Ítems pendientes
 
 ### 12b. Autoocultar (v0.2)
 
 - Opción de autoocultar la isla y mostrarla al acercar el puntero al borde superior (movido de la v0.1 a la v0.2).
-
-### 14d. `atoll-ui`: integración con la isla
-
-- **14d:** Eventos de mouse en Windows (`WM_LBUTTONDOWN`, `WM_LBUTTONUP`) y migración del reloj de la isla a un
-  árbol de widgets de `atoll-ui`.
 
 ### 15. Protocolo IPC y host de plugins
 
