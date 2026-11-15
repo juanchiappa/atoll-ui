@@ -8,6 +8,8 @@
 //! están en píxeles lógicos, a 96 DPI. Al dibujar se multiplican por el factor de
 //! escala del monitor.
 
+use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,6 +137,30 @@ pub fn report_warnings(warnings: &[Warning]) {
     for warning in warnings {
         eprintln!("atoll: config.ini ({warning})");
     }
+}
+
+/// Construye la ruta a `%SystemRoot%\explorer.exe` a partir del valor de `SystemRoot`.
+///
+/// Es una función pura y portable (testeable en Linux): devuelve `None` cuando `system_root`
+/// es `None`, está vacío o contiene solo espacios/barras, y normaliza las barras finales
+/// (`\` o `/`) antes de unir `explorer.exe`.
+#[must_use]
+pub fn explorer_path_from_system_root(system_root: Option<OsString>) -> Option<PathBuf> {
+    let raw = system_root?;
+    if raw.is_empty() {
+        return None;
+    }
+    let base = match raw.to_str() {
+        Some(text) => {
+            let trimmed = text.trim().trim_end_matches(['\\', '/']);
+            if trimmed.is_empty() {
+                return None;
+            }
+            PathBuf::from(trimmed)
+        }
+        None => PathBuf::from(raw),
+    };
+    Some(base.join("explorer.exe"))
 }
 
 /// Decide si al arrancar corresponde escribir la plantilla por defecto (`Config::default().to_text()`)
@@ -418,10 +444,26 @@ impl Painter for IslandPainter {
             eprintln!("atoll: no hay archivo de configuración disponible para abrir");
             return;
         };
-        if let Err(err) = Command::new("explorer.exe").arg(path).spawn() {
+        let Some(explorer) = explorer_path_from_system_root(env::var_os("SystemRoot")) else {
             eprintln!(
-                "atoll: no se pudo abrir '{}' con explorer.exe: {err}",
+                "atoll: SystemRoot no está definido; no se puede abrir '{}'",
                 path.display()
+            );
+            return;
+        };
+        if !explorer.is_file() {
+            eprintln!(
+                "atoll: no existe '{}'; no se puede abrir '{}'",
+                explorer.display(),
+                path.display()
+            );
+            return;
+        }
+        if let Err(err) = Command::new(&explorer).arg(path).spawn() {
+            eprintln!(
+                "atoll: no se pudo abrir '{}' con '{}': {err}",
+                path.display(),
+                explorer.display()
             );
         }
     }
@@ -438,13 +480,14 @@ impl Painter for IslandPainter {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
 
     use super::{
-        effective_color, filter_new_warnings, format_date, format_time, island_config_from,
-        load_or_create_config, physical_corner_radii, physical_corner_radius,
-        should_populate_default_config, IslandPainter,
+        effective_color, explorer_path_from_system_root, filter_new_warnings, format_date,
+        format_time, island_config_from, load_or_create_config, physical_corner_radii,
+        physical_corner_radius, should_populate_default_config, IslandPainter,
     };
     use atoll_config::{Color as ConfigColor, Config, CornerRadius, Theme, Warning, WarningKind};
     use atoll_platform::{LocalTime, Painter};
@@ -1022,5 +1065,43 @@ style = notch
         assert_eq!(fs::read_to_string(&file).expect("lee"), "");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn explorer_path_from_system_root_handles_normal_missing_empty_and_trailing_slash() {
+        // 1. Valor ausente -> None.
+        assert_eq!(explorer_path_from_system_root(None), None);
+
+        // 2. Valor vacío (o solo espacios/barras) -> None.
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from(""))),
+            None
+        );
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from("   "))),
+            None
+        );
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from("\\/"))),
+            None
+        );
+
+        // 3. Valor normal -> %SystemRoot%\explorer.exe.
+        let expected_win = PathBuf::from(r"C:\Windows").join("explorer.exe");
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from(r"C:\Windows"))),
+            Some(expected_win.clone())
+        );
+
+        // 4. Valor con barra final (\ o /) -> mismo resultado que el valor normal en Windows y Linux.
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from(r"C:\Windows\"))),
+            Some(expected_win)
+        );
+        let expected_posix = PathBuf::from("/usr/windows").join("explorer.exe");
+        assert_eq!(
+            explorer_path_from_system_root(Some(OsString::from("/usr/windows/"))),
+            Some(expected_posix)
+        );
     }
 }
