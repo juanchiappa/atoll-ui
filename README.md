@@ -14,20 +14,34 @@ Una UI liviana y nativa para tu sistema operativo. Isla dinámica, personalizaci
 
 ## Medición
 
-> **Estos números corresponden a la versión `v0.1.0`.** La `v0.2.0` incluye más funciones (`atoll-ui`, botones de Ajustes y Cerrar, fuente ampliada) y sus mediciones se publican aparte.
+Mediciones sobre el ejecutable descargado de cada Release, en **Windows x64** (solo Windows), con la isla en reposo (sin mover el mouse):
 
-Datos medidos sobre el ejecutable descargado del release [`v0.1.0`](https://github.com/juanchiappa/atoll-ui/releases/tag/v0.1.0) en **Windows x64** con la isla abierta en reposo:
+| | [`v0.1.0`](https://github.com/juanchiappa/atoll-ui/releases/tag/v0.1.0) | [`v0.2.0`](https://github.com/juanchiappa/atoll-ui/releases/tag/v0.2.0) |
+|---|---|---|
+| Ejecutable `atoll.exe` | 548 KB | 691 KB |
+| Zip del Release | 263 KB | 345 KB |
+| RAM con la isla contraída (`WorkingSet64`) | 8,5 MB | entre 7,7 y 7,9 MB |
+| RAM con la isla expandida (`WorkingSet64`) | no medido | entre 10,0 y 10,3 MB |
+| Memoria según el Administrador de Tareas | no medido | no medido |
+| CPU en reposo (tiempo de CPU acumulado) | no cambió entre dos mediciones separadas por 30 s | contraída: 0,016 s y expandida: 0,078 s, sin cambio en 5 minutos |
 
-- **RAM en reposo:** **8,5 MB** (`WorkingSet64`, medido vía `Get-Process`).
-- **CPU en reposo:** **0 %** — el tiempo de CPU acumulado no cambia entre dos mediciones separadas por 30 segundos.
-- **Tamaño:** ejecutable `atoll.exe` de **548 KB** y paquete `atoll-v0.1.0-windows-x64.zip` de **263 KB**.
+**Cómo leer estos números**
 
-Podés reproducir la medición en Windows con PowerShell mienras `atoll.exe` está abierto en reposo:
+- **CPU:** en reposo no hay consumo medible: en 5 minutos con la isla quieta, contraída o expandida, el tiempo de CPU acumulado no cambió. (Para la `v0.1.0` la medición fue más corta: dos muestras separadas por 30 segundos.)
+- **Memoria:** hay dos métricas distintas. `WorkingSet64` (la que usa el script de abajo) incluye páginas compartidas con el sistema; el Administrador de Tareas muestra el conjunto de trabajo privado, que suele ser menor. Por eso no se pueden comparar entre sí y se informan por separado.
+- **Expandida vs. contraída:** la isla expandida usa más memoria que la contraída.
+- **Tamaños:** están en KB de 1024 bytes, tal como los muestra el Explorador de Windows.
+- **Alcance:** las cifras de la `v0.2.0` salen de una PC concreta (Microsoft Windows 11 Pro, compilación 26200), con 6 muestras separadas por 60 segundos por cada estado de la isla, y las de la `v0.1.0` de la medición hecha en su momento; pueden variar levemente en otras PC y versiones de Windows.
+
+Para reproducir la medición de 5 minutos en Windows con PowerShell, con `atoll.exe` abierto y la isla quieta (el mouse sin moverse):
 
 ```powershell
-Get-Process atoll | Select-Object Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64 / 1MB, 2)}}, CPU
-Start-Sleep -Seconds 30
-Get-Process atoll | Select-Object Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64 / 1MB, 2)}}, CPU
+$p = Get-Process atoll
+1..6 | ForEach-Object {
+  $p.Refresh()
+  "{0:HH:mm:ss}  CPU={1:N3}s  RAM={2:N1}MB" -f (Get-Date), $p.TotalProcessorTime.TotalSeconds, ($p.WorkingSet64/1MB)
+  Start-Sleep 60
+}
 ```
 
 ## Descarga
