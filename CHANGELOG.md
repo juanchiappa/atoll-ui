@@ -7,15 +7,25 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
 ### Agregado
 
-- **Mini toolkit declarativo `atoll-ui` (`packages/atoll-ui`):** árbol de widgets de datos planos (`Row`, `Column`, `Box`, `Spacer`, `Divider`, `Label`, `Icon`, `ProgressBar`, `Button`, `IconButton`, `Toggle`, `Slider`), validación con límites (`MAX_TREE_DEPTH = 32`, `MAX_TREE_NODES = 1024`), motor de layout puro y determinista (`compute_layout`), hit-testing (`hit_test`), máquina de estados interactiva (`UiState`), paleta de colores derivada del tema (`ThemePalette::from_appearance`), catálogo de 11 íconos vectoriales sin fuentes (`IconId`) y pintado sobre `atoll-render::Frame` (`paint_tree` / `paint_tree_with_text`), con 0 dependencias externas.
-- **Primitivas de dibujo recortadas y subconjunto de fuente ampliado (`atoll-render`):** `ClipRect`, `PathCmd`, `fill_rounded_rect`, `stroke_path` y `TextRenderer::draw_clipped`, junto con la ampliación de `Inter-Medium-atoll.ttf` a 222 glifos (ASCII imprimible completo, Latin-1 Supplement y signos tipográficos habituales).
-- **Vista expandida interactiva en la isla (`atoll-core`, `atoll-platform`):** al completarse la expansión de hover se dibuja un árbol de `atoll-ui` con la hora y la fecha a la izquierda y los botones `IconButton` de **Ajustes** (engranaje, que abre `%APPDATA%\Atoll\config.ini` invocando la ruta absoluta `%SystemRoot%\explorer.exe` sin buscar en `PATH` ni en el directorio actual) y **Cerrar** (`X`, que cierra la isla) a la derecha, con soporte completo de temas, estilos (`island` y `notch`), escalado DPI y captura de mouse (`SetCapture` / `ReleaseCapture`) sin agregar timers nuevos.
+- **Mini toolkit declarativo `atoll-ui` (`packages/atoll-ui`):** árbol de widgets de datos planos (`Row`, `Column`, `Box`, `Spacer`, `Divider`, `Label`, `Icon`, `ProgressBar`, `Button`, `IconButton`, `Toggle`, `Slider`), validación con límites (`MAX_TREE_DEPTH = 32`, `MAX_TREE_NODES = 1024`), motor de layout puro y determinista (`compute_layout`), hit-testing (`hit_test`) y estado interactivo con eventos de puntero (`UiState`), paleta de colores derivada del tema (`ThemePalette::from_appearance`), catálogo de 11 íconos vectoriales sin fuentes (`IconId`) y pintado sobre `atoll-render::Frame` (`paint_tree` / `paint_tree_with_text`), sin dependencias externas.
+- **Integración de `atoll-ui` en la isla (`atoll-core`, `atoll-platform`):** al terminar de expandirse con el mouse encima, la isla muestra la hora y la fecha a la izquierda y los botones de **Ajustes** (engranaje, abre `config.ini`) y **Cerrar** (`X`, cierra la isla) a la derecha, con soporte de temas, estilos (`island` y `notch`) y escalado DPI. Se agregan los eventos de mouse izquierdo (`WM_LBUTTONDOWN` / `WM_LBUTTONUP` con `SetCapture` / `ReleaseCapture`) sin timers nuevos; el clic derecho sigue cerrando la isla.
+- **Primitivas de dibujo en `atoll-render`:** `ClipRect`, `PathCmd`, `fill_rounded_rect`, `stroke_path` y `TextRenderer::draw_clipped`.
+- **Fuente embebida ampliada:** `Inter-Medium-atoll.ttf` pasa a incluir ASCII imprimible completo, Latin-1 Supplement y signos tipográficos comunes (`•`, `·`, `…`, `–`, `—`, comillas, `€`, `°`, `×`).
+- **Archivos de comunidad:** `CONTRIBUTING.md` (con firma DCO mediante `git commit -s`), `SECURITY.md`, plantillas de issues (reporte de errores y pedido de funciones) y plantilla de Pull Request.
 
 ### Cambiado
 
-- **Transición de contenido en la isla:** en reposo y durante todo el recorrido de la animación de expansión o contracción se dibuja únicamente la hora centrada; la fecha y los botones aparecen al finalizar la expansión y vuelven de inmediato a la hora centrada cuando comienza la contracción.
+- **El botón de Ajustes abre `config.ini` con `%SystemRoot%\explorer.exe` por ruta absoluta**, sin búsqueda en `PATH` ni en el directorio actual; si `SystemRoot` o el archivo no existen, informa por `stderr` y no lanza nada.
+- **Contenido de la isla durante la animación:** en reposo y durante toda la animación de expansión o contracción se dibuja únicamente la hora centrada; la fecha y los botones aparecen al finalizar la expansión y desaparecen de inmediato cuando comienza la contracción.
+
+### Corregido
+
+- **`config.ini` vacío o con solo espacios y saltos de línea:** al iniciar se rellena con los valores por defecto (los archivos con cualquier otro contenido, incluso solo comentarios, no se tocan).
+- **Coordenadas extremas en el rasterizador:** `atoll-render` acota las coordenadas antes de pasarlas a `tiny-skia` para evitar desbordes del rasterizador en punto fijo.
 
 ## [0.1.0] - 2026-11-12
 
@@ -35,5 +45,6 @@ Primera versión pública de Atoll (solo Windows x64).
   - `animation_ms` (`0..=1000`): duración de la animación `ease-out cubic` de expandir y contraer (`0` = instantáneo).
   - `style` (`island` | `notch`): modo isla flotante con las cuatro esquinas redondeadas o modo muesca (`notch`) pegado al borde superior (`y = 0`) con esquinas superiores rectas e inferiores redondeadas.
 
+[Unreleased]: https://github.com/juanchiappa/atoll-ui/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/juanchiappa/atoll-ui/releases/tag/v0.2.0
 [0.1.0]: https://github.com/juanchiappa/atoll-ui/releases/tag/v0.1.0
-

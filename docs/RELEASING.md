@@ -10,14 +10,14 @@ Este documento describe el procedimiento paso a paso para preparar, probar, publ
    git pull --ff-only
    git status
    ```
-2. Creá una rama para la versión (por ejemplo `chore/release-v0-1-0`):
+2. Creá una rama para la versión (por ejemplo `chore/release-v0-2` para la `v0.2.0`):
    ```powershell
-   git checkout -b chore/release-v0-1-0
+   git checkout -b chore/release-v0-2
    ```
 3. Verificá (o actualizá) la versión del workspace en `Cargo.toml` bajo `[workspace.package]`:
    ```toml
    [workspace.package]
-   version = "0.1.0"
+   version = "0.2.0"
    ```
    Si cambiaste la versión, ejecutá `cargo check --workspace` para que `Cargo.lock` quede sincronizado.
 4. Actualizá `CHANGELOG.md` siguiendo el formato [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) con un encabezado exacto `## [X.Y.Z] - AAAA-MM-DD`. El workflow de release extrae automáticamente el contenido de esa sección para armar las notas del Release; si la sección no existe o está vacía, el workflow falla.
@@ -43,6 +43,9 @@ Antes de crear el tag, probá el workflow manualmente desde GitHub Actions:
 
 ## 3. Crear y empujar el tag (`vX.Y.Z`)
 
+> [!WARNING]
+> Los tags `v*` están protegidos por una regla del repositorio que **impide borrarlos** (y, por lo tanto, no se puede corregir un tag mal puesto borrándolo y volviendo a crearlo). Por eso **siempre se prueba primero la corrida manual** del workflow (sección 2) y solo después se crea el tag. Verificá dos veces que el tag apunte al commit correcto de `main` y que coincida con `version` en `Cargo.toml` antes de empujarlo.
+
 Una vez verificado el artifact de prueba:
 
 1. Actualizá `main` localmente:
@@ -52,10 +55,10 @@ Una vez verificado el artifact de prueba:
    ```
 2. Creá un tag anotado `vX.Y.Z` (debe coincidir exactamente con `version` en `Cargo.toml`) y empujalo:
    ```powershell
-   git tag -a v0.1.0 -m "Atoll v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m "Atoll v0.2.0"
+   git push origin v0.2.0
    ```
-3. Al empujar el tag `v0.1.0`, el workflow `.github/workflows/release.yml` corre automáticamente:
+3. Al empujar el tag `v0.2.0`, el workflow `.github/workflows/release.yml` corre automáticamente:
    - Verifica que el tag `vX.Y.Z` coincida con `[workspace.package].version` en `Cargo.toml`.
    - Extrae las notas de la sección `## [X.Y.Z]` de `CHANGELOG.md`.
    - Compila y empaqueta `atoll-vX.Y.Z-windows-x64.zip` y `atoll-vX.Y.Z-windows-x64.zip.sha256`.
@@ -66,8 +69,8 @@ Una vez verificado el artifact de prueba:
 1. Descargá `atoll-vX.Y.Z-windows-x64.zip` y `atoll-vX.Y.Z-windows-x64.zip.sha256` desde la página de Releases de GitHub.
 2. Comprobá el checksum SHA256 en PowerShell:
    ```powershell
-   Get-FileHash .\atoll-v0.1.0-windows-x64.zip -Algorithm SHA256
-   Get-Content .\atoll-v0.1.0-windows-x64.zip.sha256
+   Get-FileHash .\atoll-v0.2.0-windows-x64.zip -Algorithm SHA256
+   Get-Content .\atoll-v0.2.0-windows-x64.zip.sha256
    ```
 3. Descomprimí el archivo, ejecutá `atoll.exe` y dejá la isla abierta en reposo (sin apoyar el mouse encima).
 4. Medí el consumo de memoria (`WorkingSet64`) y el tiempo acumulado de CPU dos veces separadas por 30 segundos:
@@ -77,5 +80,5 @@ Una vez verificado el artifact de prueba:
    Get-Process atoll | Select-Object Name, Id, @{N='RAM_MB';E={[math]::Round($_.WorkingSet64 / 1MB, 2)}}, CPU
    ```
    - **Criterio de aceptación:** `RAM_MB < 20` y el valor de `CPU` (segundos acumulados de procesador) idéntico entre ambas muestras (`0,00` de diferencia en 30 segundos = 0 % de CPU en reposo).
-5. Cerrá la isla haciendo clic derecho sobre ella.
+5. Cerrá la isla con el botón **Cerrar** (visible al expandirse, desde la `v0.2.0`) o haciendo clic derecho sobre ella.
 
