@@ -16,6 +16,7 @@ path = "src/main.rs"
 atoll-config.workspace = true
 atoll-platform.workspace = true
 atoll-render.workspace = true
+atoll-ui.workspace = true
 
 [lints]
 workspace = true

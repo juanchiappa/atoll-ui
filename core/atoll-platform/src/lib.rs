@@ -130,12 +130,85 @@ impl fmt::Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
-/// Dibuja el contenido de la isla y gestiona su recarga de configuración.
+/// Botón del mouse en un evento de puntero de la plataforma.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    /// Botón izquierdo (principal).
+    Left,
+    /// Botón derecho (secundario).
+    Right,
+    /// Botón central (rueda).
+    Middle,
+    /// Otro botón numerado.
+    Other(u8),
+}
+
+/// Evento de puntero entregado por el backend al [`Painter`], en píxeles físicos
+/// relativos a la esquina superior izquierda de la ventana de la isla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerEvent {
+    /// El puntero se movió a `(x, y)` en coordenadas físicas de la ventana.
+    Move {
+        /// Coordenada horizontal física en píxeles.
+        x: i32,
+        /// Coordenada vertical física en píxeles.
+        y: i32,
+    },
+    /// El puntero salió de la ventana o se perdió la captura del mouse.
+    Leave,
+    /// Se presionó un botón del mouse en `(x, y)`.
+    Down {
+        /// Coordenada horizontal física en píxeles.
+        x: i32,
+        /// Coordenada vertical física en píxeles.
+        y: i32,
+        /// Botón presionado.
+        button: MouseButton,
+    },
+    /// Se soltó un botón del mouse en `(x, y)`.
+    Up {
+        /// Coordenada horizontal física en píxeles.
+        x: i32,
+        /// Coordenada vertical física en píxeles.
+        y: i32,
+        /// Botón soltado.
+        button: MouseButton,
+    },
+}
+
+/// Acción de alto nivel solicitada por el [`Painter`] tras procesar un evento.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PainterAction {
+    /// Abrir el archivo de configuración con la aplicación predeterminada.
+    OpenConfig,
+    /// Cerrar la isla y terminar la aplicación.
+    Quit,
+}
+
+/// Resultado devuelto por [`Painter::on_pointer`] al procesar un [`PointerEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PointerOutcome {
+    /// `true` si cambió algún estado visual y el backend debe redibujar un único cuadro.
+    pub needs_redraw: bool,
+    /// Lista de acciones solicitadas por el [`Painter`].
+    pub actions: Vec<PainterAction>,
+}
+
+impl PointerOutcome {
+    /// Resultado vacío sin redibujado ni acciones.
+    pub const NONE: Self = Self {
+        needs_redraw: false,
+        actions: Vec::new(),
+    };
+}
+
+/// Dibuja el contenido de la isla, recibe eventos de puntero y gestiona la recarga de configuración.
 ///
 /// El backend lo llama cada vez que hay que mostrar algo nuevo: al abrir, en cada
 /// cuadro de la animación de hover, cuando cambia el minuto, cuando cambia el
-/// DPI del monitor y cuando se recarga el archivo de configuración. Quién implementa
-/// este trait decide qué se ve; el backend solo lo entrega al sistema operativo.
+/// DPI del monitor, cuando se recarga el archivo de configuración y cuando un
+/// evento de puntero pide redibujar. Quién implementa este trait decide qué se ve;
+/// el backend solo lo entrega al sistema operativo.
 pub trait Painter {
     /// Dibuja la isla con la hora `time`.
     ///
@@ -145,6 +218,22 @@ pub trait Painter {
     ///
     /// Devuelve `None` si no se pudo dibujar.
     fn paint(&mut self, size: Size, scale: f32, time: LocalTime) -> Option<Frame>;
+
+    /// Notifica al painter si la isla está totalmente expandida (en hover y con la
+    /// animación de expansión terminada).
+    ///
+    /// Cuando pasa a `false` (en reposo, esperando retardo, expandiéndose o
+    /// empezando a contraer), el contenido interactivo se oculta de inmediato.
+    fn set_expanded(&mut self, _expanded: bool) {}
+
+    /// Procesa un evento de puntero en coordenadas físicas de la ventana y devuelve
+    /// si hace falta redibujar más las acciones a ejecutar.
+    fn on_pointer(&mut self, _event: PointerEvent) -> PointerOutcome {
+        PointerOutcome::NONE
+    }
+
+    /// Ejecuta la apertura del archivo de configuración cuando se solicitó [`PainterAction::OpenConfig`].
+    fn open_config(&mut self) {}
 
     /// Se invoca cuando el archivo de configuración cambió en disco (tras el debounce).
     ///

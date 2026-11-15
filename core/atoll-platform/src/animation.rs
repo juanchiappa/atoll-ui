@@ -119,6 +119,18 @@ impl Animator {
         self.hovering
     }
 
+    /// Indica si hay una transición de tamaño en curso.
+    #[must_use]
+    pub const fn is_animating(&self) -> bool {
+        self.animating
+    }
+
+    /// Indica si la isla está en hover y la animación de expansión ya terminó.
+    #[must_use]
+    pub const fn is_fully_expanded(&self) -> bool {
+        self.hovering && !self.animating
+    }
+
     /// Indica si el puntero del mouse está actualmente dentro de la isla.
     #[must_use]
     pub const fn is_pointer_inside(&self) -> bool {
@@ -514,5 +526,43 @@ mod tests {
         let collapsed = anim.tick(t_leave + DURATION);
         assert!(collapsed.finished);
         assert_eq!(collapsed.size, SMALL);
+    }
+
+    #[test]
+    fn is_fully_expanded_is_true_only_when_hovering_and_animation_finished() {
+        let t0 = Instant::now();
+        let mut anim = Animator::new(SMALL, BIG, DURATION, t0).with_timing(100, DURATION);
+        assert!(!anim.is_fully_expanded());
+        assert!(!anim.is_animating());
+
+        // Durante el retardo de hover sigue contraída.
+        assert_eq!(
+            anim.on_mouse_enter(t0),
+            HoverAction::ArmDelayTimer { delay_ms: 100 }
+        );
+        assert!(!anim.is_fully_expanded());
+
+        // Comienza la expansión: está en hover, pero animando.
+        let t1 = t0 + Duration::from_millis(100);
+        assert_eq!(anim.on_delay_elapsed(t1), HoverAction::StartExpand);
+        assert!(anim.is_hovering());
+        assert!(anim.is_animating());
+        assert!(!anim.is_fully_expanded());
+
+        // A mitad de la expansión sigue animando -> no está totalmente expandida.
+        let mid = anim.tick(t1 + Duration::from_millis(100));
+        assert!(!mid.finished);
+        assert!(!anim.is_fully_expanded());
+
+        // Recién cuando termina la animación de expansión pasa a `true`.
+        let end = anim.tick(t1 + DURATION);
+        assert!(end.finished);
+        assert!(!anim.is_animating());
+        assert!(anim.is_fully_expanded());
+
+        // Apenas empieza a contraer, vuelve de inmediato a `false`.
+        let t2 = t1 + DURATION + Duration::from_millis(10);
+        assert_eq!(anim.on_mouse_leave(t2), HoverAction::StartCollapse);
+        assert!(!anim.is_fully_expanded());
     }
 }

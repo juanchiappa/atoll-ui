@@ -10,39 +10,33 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use atoll_config::{Color as ConfigColor, Config, CornerRadius, IslandStyle, Warning};
-use atoll_platform::dpi::scale_px;
-use atoll_platform::{IslandConfig, LocalTime, Painter};
+use atoll_platform::dpi::scale_size;
+use atoll_platform::{IslandConfig, LocalTime, Painter, PointerEvent, PointerOutcome};
 use atoll_render::{
     render_island_styled, Color, CornerRadii, Frame, RenderError, Size, TextRenderer,
 };
 
+use crate::island_ui::ExpandedIslandUi;
+
 /// Días de la semana abreviados, empezando por el domingo.
-const WEEKDAYS: [&str; 7] = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+pub const WEEKDAYS: [&str; 7] = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
 
 /// Meses abreviados, empezando por enero.
-const MONTHS: [&str; 12] = [
+pub const MONTHS: [&str; 12] = [
     "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
 ];
 
 /// Texto que se muestra si el día o el mes vienen fuera de rango.
 const UNKNOWN: &str = "---";
 
-/// Tamaño de la hora, en píxeles lógicos.
+/// Tamaño de la hora en reposo (y durante la animación), en píxeles lógicos.
 const TIME_PX: f32 = 22.0;
-
-/// Tamaño de la fecha, en píxeles lógicos.
-const DATE_PX: f32 = 13.0;
 
 /// Altura de las mayúsculas y los dígitos de Inter, como fracción del tamaño (1490 / 2048).
 const CAP_HEIGHT: f32 = 0.7275;
-
-/// Separación entre la hora y la fecha, en píxeles lógicos.
-const LINE_GAP: f32 = 8.0;
-
-/// Opacidad máxima de la fecha (0 a 255), cuando la isla está totalmente expandida.
-const DATE_ALPHA: f32 = 190.0;
 
 /// Hora en formato 24 h: `HH:MM`.
 #[must_use]
@@ -185,7 +179,8 @@ pub fn load_or_create_config(dir: &Path, file: &Path) -> (Config, Vec<Warning>) 
     (config, warnings)
 }
 
-/// Dibuja la isla con la hora y la fecha, aplicando el tema, el estilo y los tamaños de [`Config`].
+/// Dibuja la isla con la hora en reposo y el árbol de widgets de `atoll-ui` cuando está
+/// totalmente expandida, aplicando el tema, el estilo y los tamaños de [`Config`].
 #[derive(Debug)]
 pub struct IslandPainter {
     text: TextRenderer,
@@ -196,6 +191,15 @@ pub struct IslandPainter {
     last_warnings: Vec<Warning>,
     /// Escala con la que se dibujó el último cuadro (bits del `f32`), para saber cuándo cambia.
     last_scale: u32,
+    /// Última hora dibujada, para reconstruir el árbol si cambia la configuración o el DPI.
+    last_time: LocalTime,
+    /// Estado explícito de expansión informado por el backend (`Some(true)` solo cuando está
+    /// en hover y la animación de expansión terminó). Si es `None`, se deduce de `size == hover_size`.
+    expanded_override: Option<bool>,
+    /// Indica si el último cuadro dibujado fue la vista expandida con el árbol de widgets.
+    last_drawn_expanded: bool,
+    /// Estado interactivo y layout cacheado del árbol `atoll-ui` de la isla expandida.
+    ui: ExpandedIslandUi,
 }
 
 impl IslandPainter {
@@ -231,6 +235,19 @@ impl IslandPainter {
             config_file,
             last_warnings: Vec::new(),
             last_scale: 1.0_f32.to_bits(),
+            last_time: LocalTime {
+                year: 2026,
+                month: 1,
+                day: 1,
+                weekday: 4,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                millisecond: 0,
+            },
+            expanded_override: None,
+            last_drawn_expanded: false,
+            ui: ExpandedIslandUi::new(),
         })
     }
 
@@ -248,15 +265,31 @@ impl IslandPainter {
         &self.config
     }
 
+    /// Estado interactivo y layout del árbol de widgets de la isla expandida.
+    #[must_use]
+    #[allow(dead_code)]
+    pub const fn ui(&self) -> &ExpandedIslandUi {
+        &self.ui
+    }
+
     /// Aplica `next` únicamente si es distinta de la [`Config`] actual.
     ///
-    /// Si cambió, actualiza la configuración interna y devuelve `Some(IslandConfig)`
-    /// con las nuevas medidas lógicas; si es idéntica, devuelve `None`.
+    /// Si cambió, actualiza la configuración interna, sincroniza el árbol y `UiState::sync`
+    /// si ya había un layout activo, y devuelve `Some(IslandConfig)` con las nuevas medidas
+    /// lógicas; si es idéntica, devuelve `None`.
     pub fn apply_config_if_changed(&mut self, next: Config) -> Option<IslandConfig> {
         if next == self.config {
             return None;
         }
         self.config = next;
+        if self.ui.layout().is_some() {
+            let scale = f32::from_bits(self.last_scale);
+            let time_text = format_time(&self.last_time);
+            let date_text = format_date(&self.last_time);
+            let _ = self
+                .ui
+                .sync_tree(&self.config, scale, &time_text, &date_text, &mut self.text);
+        }
         Some(island_config_from(&self.config, self.config_dir.clone()))
     }
 
@@ -270,23 +303,31 @@ impl IslandPainter {
         (updated, new_warnings)
     }
 
-    /// Qué tan expandida está la isla: 0,0 en reposo y 1,0 con hover.
+    /// Determina si corresponde mostrar el árbol de `atoll-ui` en este cuadro.
     ///
-    /// `size` es el tamaño físico del cuadro; los tamaños de reposo y expandido se
-    /// escalan con `scale` para compararlos en las mismas unidades.
-    fn progress(&self, size: Size, scale: f32) -> f32 {
-        let collapsed = scale_px(self.config.island.height, scale);
-        let expanded = scale_px(self.config.island.hover_height, scale);
-        let span = expanded.saturating_sub(collapsed);
-        if span == 0 {
-            return 0.0;
+    /// El árbol solo se muestra cuando la isla está en hover y la animación de expansión
+    /// terminó (`size == scale_size(hover_size, scale)` y el estado de expansión no es `false`).
+    fn should_show_expanded_tree(&self, size: Size, scale: f32) -> bool {
+        let hover_logical = Size::new(
+            self.config.island.hover_width,
+            self.config.island.hover_height,
+        );
+        let rest_logical = Size::new(self.config.island.width, self.config.island.height);
+        let hover_phys = scale_size(hover_logical, scale);
+        let rest_phys = scale_size(rest_logical, scale);
+
+        match self.expanded_override {
+            Some(true) => size == hover_phys,
+            Some(false) => false,
+            None => size == hover_phys && hover_phys != rest_phys,
         }
-        let done = size.height.saturating_sub(collapsed);
-        (done as f32 / span as f32).clamp(0.0, 1.0)
     }
 
-    /// Dibuja un cuadro completo: isla, hora y fecha, a la escala `scale`.
+    /// Dibuja un cuadro completo: fondo de la isla y, según el estado, solo la hora centrada
+    /// (en reposo o animando) o el árbol de widgets de `atoll-ui` (expandida quieta).
     fn draw(&mut self, size: Size, scale: f32, time: &LocalTime) -> Result<Frame, RenderError> {
+        self.last_time = *time;
+
         // Una escala inválida (no finita o no positiva) se trata como 100 %.
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
@@ -309,56 +350,46 @@ impl IslandPainter {
         );
         let mut frame = render_island_styled(size, bg_color, radii)?;
 
-        let progress = self.progress(size, scale);
+        let show_tree = self.should_show_expanded_tree(size, scale);
+        self.last_drawn_expanded = show_tree;
+
+        let time_text = format_time(time);
+        if show_tree {
+            let date_text = format_date(time);
+            if self
+                .ui
+                .paint(
+                    &self.config,
+                    scale,
+                    &time_text,
+                    &date_text,
+                    &mut frame,
+                    &mut self.text,
+                )
+                .is_ok()
+            {
+                return Ok(frame);
+            }
+        }
+
+        // Isla contraída o en plena animación: se dibuja únicamente la hora centrada.
+        self.ui.reset_interaction();
         let width = size.width as f32;
         let height = size.height as f32;
-
         let time_px = TIME_PX * scale;
-        let date_px = DATE_PX * scale;
-        let line_gap = LINE_GAP * scale;
         let time_cap = time_px * CAP_HEIGHT;
-        let date_cap = date_px * CAP_HEIGHT;
-
-        // En reposo la hora va centrada; expandida, hora y fecha forman un bloque centrado.
-        // La línea base de la hora se mueve de una posición a la otra junto con la isla.
         let rest_baseline = (height + time_cap) / 2.0;
-        let block = time_cap + line_gap + date_cap;
-        let expanded_baseline = (height - block) / 2.0 + time_cap;
-        let time_baseline = rest_baseline + (expanded_baseline - rest_baseline) * progress;
-
         let text_color = effective_color(appearance.text_color, appearance.opacity);
-        let time_text = format_time(time);
         let time_width = self.text.measure(&time_text, time_px)?;
         self.text.draw(
             &mut frame,
             &time_text,
             (width - time_width) / 2.0,
-            time_baseline,
+            rest_baseline,
             time_px,
             text_color,
         )?;
 
-        // La fecha aparece con la expansión: transparente en reposo, visible con hover.
-        let max_date_alpha = f32::from(text_color.a) * (DATE_ALPHA / 255.0);
-        let alpha = (progress * max_date_alpha).round();
-        if alpha >= 1.0 {
-            let date_text = format_date(time);
-            let date_width = self.text.measure(&date_text, date_px)?;
-            let date_color = Color::rgba(
-                text_color.r,
-                text_color.g,
-                text_color.b,
-                (alpha as u32).min(255) as u8,
-            );
-            self.text.draw(
-                &mut frame,
-                &date_text,
-                (width - date_width) / 2.0,
-                time_baseline + line_gap + date_cap,
-                date_px,
-                date_color,
-            )?;
-        }
         Ok(frame)
     }
 }
@@ -366,6 +397,33 @@ impl IslandPainter {
 impl Painter for IslandPainter {
     fn paint(&mut self, size: Size, scale: f32, time: LocalTime) -> Option<Frame> {
         self.draw(size, scale, &time).ok()
+    }
+
+    fn set_expanded(&mut self, expanded: bool) {
+        self.expanded_override = Some(expanded);
+        if !expanded {
+            self.last_drawn_expanded = false;
+            self.ui.reset_interaction();
+        }
+    }
+
+    fn on_pointer(&mut self, event: PointerEvent) -> PointerOutcome {
+        let is_expanded =
+            self.expanded_override.unwrap_or(self.last_drawn_expanded) && self.last_drawn_expanded;
+        self.ui.handle_pointer(event, is_expanded)
+    }
+
+    fn open_config(&mut self) {
+        let Some(path) = self.config_file.as_deref() else {
+            eprintln!("atoll: no hay archivo de configuración disponible para abrir");
+            return;
+        };
+        if let Err(err) = Command::new("explorer.exe").arg(path).spawn() {
+            eprintln!(
+                "atoll: no se pudo abrir '{}' con explorer.exe: {err}",
+                path.display()
+            );
+        }
     }
 
     fn reload_config(&mut self) -> Option<IslandConfig> {
@@ -524,9 +582,15 @@ mod tests {
         let full = paint(&mut p, HOVER, saturday());
 
         assert!(light_bounds(&rest, 30..40).is_none(), "sin fecha en reposo");
-        let faint = brightest(&middle, 36..52);
+        // Durante la animación (tamaño intermedio) solo se dibuja la hora centrada, sin fecha.
+        assert_eq!(
+            brightest(&middle, 36..52),
+            0,
+            "durante la animación no aparece el árbol ni la fecha"
+        );
+        // Al terminar de expandir aparece el árbol con la fecha y los botones.
         let strong = brightest(&full, 36..64);
-        assert!(faint > 0 && faint < strong, "{faint} < {strong}");
+        assert!(strong > 0, "expandida muestra la fecha y los botones");
     }
 
     #[test]
@@ -545,12 +609,18 @@ mod tests {
     #[test]
     fn text_stays_inside_the_island_at_every_size_of_the_animation() {
         let mut p = painter();
-        for height in 40..=64 {
+        for height in 40..64 {
             let size = Size::new(400 + (height - 40) * 80 / 24, height);
             let frame = paint(&mut p, size, saturday());
             let (x0, _, x1, _) = light_bounds(&frame, 0..height).expect("hay texto");
             assert!(x0 > 40 && x1 < size.width - 40, "{size:?}: {x0}..{x1}");
         }
+        let full = paint(&mut p, HOVER, saturday());
+        let (x0, _, x1, _) = light_bounds(&full, 0..HOVER.height).expect("hay árbol");
+        assert!(
+            x0 >= 20 && x1 <= HOVER.width - 20,
+            "el árbol expandido respeta el padding: {x0}..{x1}"
+        );
     }
 
     #[test]
@@ -654,9 +724,16 @@ mod tests {
         let full = paint_scaled(&mut p, Size::new(720, 96), 1.5);
 
         assert!(light_bounds(&rest, 45..60).is_none(), "sin fecha en reposo");
-        let faint = brightest(&middle, 54..78);
+        assert_eq!(
+            brightest(&middle, 54..78),
+            0,
+            "a 1.5x tampoco aparece el árbol durante la animación"
+        );
         let strong = brightest(&full, 54..96);
-        assert!(faint > 0 && faint < strong, "{faint} < {strong}");
+        assert!(
+            strong > 0,
+            "a 1.5x el árbol aparece al terminar la expansión"
+        );
     }
 
     #[test]

@@ -25,6 +25,7 @@ dependencies = [
  "atoll-config",
  "atoll-platform",
  "atoll-render",
+ "atoll-ui",
 ]
 
 [[package]]
