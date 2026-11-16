@@ -68,9 +68,9 @@
 - **Texto con `fontdue` y una fuente embebida:** `atoll-render` rasteriza glifos con `fontdue` y los compone sobre un `Frame` (`TextRenderer::draw`). La fuente (Inter Medium recortada a 222 glifos, 18,0 KB) viaja dentro del binario: no se leen fuentes del sistema y no hay motor de layout. Cada glifo se rasteriza una vez por tamaño y queda en una caché acotada (512 entradas); redibujar el mismo texto no rasteriza nada. El render de texto no toca la ventana ni el backend: quien dibuja le pasa el `Frame`.
 
 ## Fases
-1. Isla dinámica en Windows (v0.1: reloj, DPI, configuración/temas y comportamiento 12a), midiendo RAM y CPU desde el primer commit.
-2. Autoocultar (12b), toolkit `atoll-ui`, sistema de plugins por IPC, idiomas y `atoll-settings`.
-3. Mismo Core en Linux (Wayland primero), macOS y plugins oficiales (música, dock).
+1. Publicadas: v0.1.0 (isla, reloj, DPI, configuración/temas y comportamiento 12a) y v0.2.0 (toolkit `atoll-ui` e isla expandida con botones), midiendo RAM y CPU desde el primer commit.
+2. Hacia v1.0 (versión completa para Windows): sistema de plugins por IPC e idiomas (v0.3), `atoll-settings`, bandeja del sistema e inicio con Windows (v0.4), comportamiento esperable (monitor, pantalla completa, ocultarse hasta el borde), plugins oficiales (música, temporizador de foco, bandeja de archivos, portapapeles) y distribución (winget, firma de código, MSIX/Store). Detalle y orden en `docs/ROADMAP.md`.
+3. v2.0: mismo Core en Linux (Wayland primero) y macOS. No se promete hasta que existan.
 
 ## Calidad
 Sin `unwrap()`, `expect()` ni `panic!` en código de producción (lints del workspace). `cargo fmt`, `cargo clippy -- -D warnings` y `cargo test` deben pasar en Windows, Linux y macOS antes de mergear.

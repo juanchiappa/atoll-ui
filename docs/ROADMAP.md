@@ -40,24 +40,25 @@ Referencia: Hecho / En revisión / Pendiente.
 | 11 | Archivo de configuración y temas (colores, tamaños, radio, opacidad, margen) (#11, #12) | Hecho |
 | 12a | Comportamiento configurable (`hover_delay_ms`, `animation_ms`, `style = island \| notch`) (#13) | Hecho |
 | 13 | Release v0.1: workflow de release con ejecutable de Windows y README | Hecho |
-| 12b | Autoocultar (v0.2) | Pendiente |
+| 12b | Ocultarse hasta el borde (ex autoocultar), ver `Comportamiento esperable` | Pendiente |
 | 14a | `atoll-ui`: árbol de widgets, validación y motor de layout puro | Hecho |
 | 14b | `atoll-ui`: hit-testing, estado de interacción y ruteo de eventos | Hecho |
 | 14c | `atoll-ui`: pintado con `atoll-render`, íconos vectoriales y `ThemePalette` | Hecho |
 | 14d | `atoll-ui`: eventos de mouse en Windows e integración del reloj en la isla | Hecho |
-| 15 | Protocolo IPC y host de plugins (con árbol de widgets) | Pendiente |
-| 16 | Idiomas es/en | Pendiente |
-| 17 | `atoll-settings`, menú de configuración (ejecutable aparte) | Pendiente |
-| 18 | Plugin de música (Windows) | Pendiente |
-| 19 | Backend de Linux (Wayland primero) | Pendiente |
-| 20 | Backend de macOS | Pendiente |
-| 21 | Dock propio (plugin, solo Windows) | Pendiente |
+| 15 | Protocolo IPC y host de plugins (con árbol de widgets), v0.3 | Pendiente |
+| 16 | Idiomas es/en, v0.3 | Pendiente |
+| 17 | `atoll-settings`, menú de configuración (ejecutable aparte), v0.4 | Pendiente |
+| 18 | Plugin de música (Windows primero) | Pendiente |
+| 19 | Backend de Linux (Wayland primero), v2.0 | Pendiente |
+| 20 | Backend de macOS, v2.0 | Pendiente |
+| 21 | Dock propio (plugin, solo Windows), opcional para v1.0 | Pendiente |
 
-**v0.1 pública = ítems 8 a 13 (con 12a, sin 12b), solo Windows.** El ítem 12b (autoocultar) pasa a la v0.2. Linux y macOS no se prometen hasta que existan.
+**v0.1.0 (publicada) = ítems 8 a 13 (con 12a, sin 12b), solo Windows. v0.2.0 (publicada) = ítem 14 (`atoll-ui`) y su integración en la isla.** **v1.0 = versión completa para Windows; Linux y macOS son v2.0** (ver `Rumbo hacia v1.0`). Linux y macOS no se prometen hasta que existan.
 
 ## Mediciones de referencia
 
-- Windows, build debug, isla abierta en reposo: 7,0 MB de RAM y 0,00 de CPU (hasta el ítem 5).
+- Las mediciones oficiales por versión están en la sección `Medición` del `README.md`: `WorkingSet64` y la memoria del Administrador de Tareas se informan por separado (ver `docs/HANDOFF.md`).
+- Referencia histórica: Windows, build debug, isla abierta en reposo: 7,0 MB de RAM y 0,00 de CPU (hasta el ítem 5).
 - Cada PR que toque render, ventana o timers tiene que volver a medir y reportar RAM y CPU en reposo.
 
 ## Ítems recientes completados
@@ -171,47 +172,103 @@ Referencia: Hecho / En revisión / Pendiente.
   izquierda y los `IconButton` de Ajustes (que abre `%APPDATA%\Atoll\config.ini` con `explorer.exe`) y Cerrar a la derecha,
   adaptándose al estilo (`island` / `notch`), radio de esquina, tema y DPI (`UiState::sync`).
 
-## Ítems pendientes
+## Rumbo hacia v1.0
 
-### 12b. Autoocultar (v0.2)
+**v1.0 = versión completa para Windows; Linux y macOS son v2.0.** Los textos públicos (README, Releases,
+panel About de GitHub, redes) no prometen Linux ni macOS hasta que existan. El orden de abajo es de
+prioridad, sin fechas ni compromisos de calendario.
 
-- Opción de autoocultar la isla y mostrarla al acercar el puntero al borde superior (movido de la v0.1 a la v0.2).
+### Publicada: v0.2.0
 
-### 15. Protocolo IPC y host de plugins
+Incluye `atoll-ui` (ítems 14a a 14d), la isla expandida con hora, fecha y botones de Ajustes y Cerrar,
+la fuente ampliada, los archivos de comunidad y el endurecimiento del lanzamiento del botón Ajustes.
+Detalle en `CHANGELOG.md`.
 
-- Protocolo en `atoll-ipc`, SDK en `atoll-plugin-sdk`, host en `atoll-core`. Named pipes en Windows y sockets
-  Unix en Linux/macOS. Los plugins mandan un árbol de widgets y el Core lo dibuja.
+### v0.3 Cimientos
+
+#### 15. Protocolo IPC y host de plugins
+
+- Protocolo en `atoll-ipc`, SDK en `atoll-plugin-sdk`, host en `atoll-core`. Named pipes en Windows. Los
+  plugins mandan un árbol de widgets y el Core lo dibuja.
 - Manifiesto de plugin con el mismo formato propio de configuración (sin agregar parser de TOML).
 - Un ADR en `docs/` fija transporte, framing, versionado y permisos antes de escribir código.
 - Antes del primer plugin oficial hay que agregar `exclude = ["plugins"]` al `Cargo.toml` raíz y actualizar el
   `.gitignore` (quitar `/plugins/*` y `!plugins/.gitkeep`, e ignorar `/plugins/**/target/`).
 - **Aceptación:** un plugin de ejemplo pinta contenido en la isla; con 0 plugins la RAM no cambia.
+- Requisitos de seguridad y versionado en "Deuda y seguimiento" (c) y (d).
 
-### 16. Idiomas es/en
+#### 16. Idiomas es/en
 
 - Tablas embebidas para español e inglés, sin crates de i18n.
 
-### 17. `atoll-settings`, menú de configuración
+### v0.4 Control del usuario
+
+#### 17. `atoll-settings`, menú de configuración
 
 - Ejecutable separado (`core/atoll-settings`) construido con `atoll-ui`. Escribe el archivo de configuración y se
   cierra, de modo que cuando está cerrado no consume RAM.
 
-### 18. Plugin de música (Windows)
+#### Ícono en la bandeja del sistema
 
-- Primer plugin oficial en `plugins/` (proyecto Cargo independiente). Usa las APIs de medios de Windows fuera del
-  Core para no ensuciar su binario ni su consumo base.
+- Menú con reabrir, ajustes y salir.
 
-### 19. Backend de Linux (Wayland primero)
+#### Iniciar con Windows
+
+- Solo si el usuario lo activa, escribiendo la clave `Run` del usuario actual (nunca por defecto ni para todos
+  los usuarios).
+
+### Comportamiento esperable
+
+- Elegir en qué monitor vive la isla (hoy solo el principal).
+- Ocultarse cuando hay juegos o aplicaciones en pantalla completa.
+- Ocultarse hasta el borde: mostrar la isla al acercar el puntero al borde superior (el ex 12b, autoocultar).
+
+### Plugins
+
+- **18. Plugin de música (Windows primero):** primer plugin oficial en `plugins/` (proyecto Cargo independiente).
+  Usa las APIs de medios de Windows fuera del Core para no ensuciar su binario ni su consumo base.
+- Temporizador de foco.
+- Bandeja de archivos.
+- Historial del portapapeles.
+
+### Distribución
+
+- Publicación en winget.
+- Firma de código, si se consigue.
+- MSIX y Microsoft Store, después de lo anterior (ver "Deuda y seguimiento" (e)).
+
+### Opcional para v1.0
+
+#### 21. Dock propio (plugin, solo Windows)
+
+- Plugin opcional para Windows, sin reemplazar la bandeja del sistema (área de notificaciones).
+
+### v2.0
+
+#### 19. Backend de Linux (Wayland primero)
 
 - Isla con alfa por píxel en Wayland (layer-shell). ADR de la dependencia antes de código. X11 queda fuera.
 - **Aceptación:** isla visible en compositores con layer-shell (Sway, Hyprland, KDE), 0 % de CPU en reposo;
   límites en GNOME/Mutter documentados.
 
-### 20. Backend de macOS
+#### 20. Backend de macOS
 
 - Panel sin bordes, flotante, sin ícono en el Dock. Binding mínimo a AppKit.
 - **Aceptación:** isla visible sobre otras apps, 0 % de CPU en reposo.
 
-### 21. Dock propio (plugin, solo Windows)
+## Deuda y seguimiento
 
-- Plugin opcional para Windows, sin reemplazar la bandeja del sistema (área de notificaciones).
+Pendientes registrados, sin prioridad ni fecha asignada salvo donde se indica el ítem al que pertenecen.
+
+- **(a) README, memoria del Administrador de Tareas:** completar la columna "Memoria según el Administrador de
+  Tareas" de v0.1.0 y v0.2.0 (hoy figura "no medido").
+- **(b) Memoria al expandir:** investigar por qué la isla expandida usa unos 2 MB más que la contraída y si esa
+  memoria se devuelve al contraer.
+- **(c) Versionado del protocolo IPC (ítem 15):** test que falle si el formato del protocolo cambia sin subir
+  `PROTOCOL_VERSION`, y mensaje claro cuando un plugin necesita una versión más nueva del protocolo.
+- **(d) Seguridad de la tubería local del IPC (ítem 15):** debe restringir quién puede conectarse (solo el mismo
+  usuario).
+- **(e) Microsoft Store:** antes de publicar, verificar que `%APPDATA%\Atoll\config.ini` sigue funcionando, porque
+  los paquetes MSIX redirigen las escrituras de AppData.
+- **(f) Idea de baja prioridad, pantallas OLED:** desplazar la isla 1 o 2 píxeles en cada redibujado por minuto
+  para proteger pantallas OLED, sin agregar timers.

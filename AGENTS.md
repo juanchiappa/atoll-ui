@@ -28,7 +28,7 @@ docs/                  ARCHITECTURE.md, CONFIG.md, DEPENDENCIES.md, ROADMAP.md, 
 Planeado: `core/atoll-settings` (menú de configuración, ejecutable aparte).
 
 ## Estado
-Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio por esquina configurables), animación de hover con timer efímero y retardo opcional (`hover_delay_ms`, `animation_ms`), estilo `island` o `notch` (muesca superior), texto, reloj, escalado DPI por monitor, y archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo. Linux y macOS devuelven `Unsupported`.
+Hecho (Windows): ventana de isla con alfa por píxel (`WS_EX_LAYERED` + `UpdateLayeredWindow`), render con tiny-skia (borde suavizado, color, opacidad y radio por esquina configurables), animación de hover con timer efímero y retardo opcional (`hover_delay_ms`, `animation_ms`), estilo `island` o `notch` (muesca superior), texto, reloj, escalado DPI por monitor, archivo de configuración y temas (`%APPDATA%\Atoll\config.ini`) con recarga en vivo, y el toolkit `atoll-ui` integrado en la isla expandida (hora, fecha y botones de Ajustes y Cerrar). Versiones publicadas: v0.1.0 y v0.2.0. Linux y macOS devuelven `Unsupported`.
 Verificá el estado real leyendo `Cargo.toml` de cada crate, `docs/ROADMAP.md` y `docs/DEPENDENCIES.md`.
 
 ## Dependencias aprobadas
@@ -64,8 +64,8 @@ Cualquier otra está prohibida hasta que se apruebe.
 No modifiques `LICENSE` ni `TRADEMARK.md`. No toques `.github/workflows/` salvo que la tarea lo pida. Nunca commitees `target/`, binarios ni videos.
 
 ## Backlog (fuente: `docs/ROADMAP.md`)
-11 Archivo de configuración y temas. 12a Comportamiento configurable (hover delay, duración, estilo isla/notch). 13 Release v0.1. 12b Autoocultar (v0.2). 14 `atoll-ui`. 15 IPC y host de plugins. 16 Idiomas es/en. 17 `atoll-settings`. 18 Plugin de música (Windows). 19 Backend de Linux. 20 Backend de macOS. 21 Dock (plugin, Windows).
-La v0.1 pública es: isla + reloj + DPI + configuración y temas + comportamiento (12a), solo Windows.
+Orden de prioridad, sin fechas. v0.3 Cimientos: 15 IPC y host de plugins, 16 Idiomas es/en. v0.4 Control del usuario: 17 `atoll-settings`, ícono en la bandeja, iniciar con Windows (opt-in). Comportamiento esperable: elegir monitor, ocultarse con pantalla completa, ocultarse hasta el borde (ex 12b). Plugins: 18 música (Windows primero), temporizador de foco, bandeja de archivos, historial del portapapeles. Distribución: winget, firma de código, MSIX y Store. Opcional para v1.0: 21 dock (plugin, Windows). v2.0: 19 backend de Linux y 20 backend de macOS.
+v1.0 = versión completa para Windows; Linux y macOS son v2.0 y no se prometen en textos públicos hasta que existan. Ya publicadas: v0.1.0 (isla, reloj, DPI, configuración y temas, comportamiento 12a) y v0.2.0 (`atoll-ui` e isla expandida).
 
 ## Cómo hablarme
 Español rioplatense, directo. Una sola recomendación, no menús de opciones. Archivos completos, no parches. Si algo es ambiguo, preguntá UNA vez antes de escribir código.
